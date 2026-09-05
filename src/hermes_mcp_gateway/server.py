@@ -129,6 +129,59 @@ class Gateway:
         self.startup = StartupContext(max_total_bytes=self.config.max_startup_bytes)
         self.catalog: dict[str, CatalogEntry] = {}
         self.missing_final_tools: set[str] = set()
+        self.web_tools_ready = False
+
+    @staticmethod
+    def _payload_has_error(value: Any) -> bool:
+        if isinstance(value, dict):
+            if value.get("error"):
+                return True
+            if value.get("success") is False:
+                return True
+            return any(Gateway._payload_has_error(item) for item in value.values())
+        if isinstance(value, (list, tuple)):
+            return any(Gateway._payload_has_error(item) for item in value)
+        return False
+
+    @classmethod
+    def _tool_result_has_error(cls, result: types.CallToolResult) -> bool:
+        if result.is_error:
+            return True
+        if result.structured_content is not None and cls._payload_has_error(
+            result.structured_content
+        ):
+            return True
+        for item in result.content:
+            if not isinstance(item, types.TextContent):
+                continue
+            try:
+                payload = json.loads(item.text)
+            except (TypeError, json.JSONDecodeError):
+                continue
+            if cls._payload_has_error(payload):
+                return True
+        return False
+
+    async def probe_web_tools(self) -> bool:
+        try:
+            search, extract = await asyncio.gather(
+                asyncio.wait_for(
+                    self.hermes.call("web_search", {"query": "OpenAI", "limit": 1}),
+                    timeout=self.config.timeout_seconds,
+                ),
+                asyncio.wait_for(
+                    self.hermes.call(
+                        "web_extract",
+                        {"urls": ["https://example.com"], "format": "markdown"},
+                    ),
+                    timeout=self.config.timeout_seconds,
+                ),
+            )
+        except Exception:  # noqa: BLE001 - readiness probe must fail closed
+            return False
+        return not (
+            self._tool_result_has_error(search) or self._tool_result_has_error(extract)
+        )
 
     async def start(self) -> None:
         try:
@@ -148,7 +201,11 @@ class Gateway:
                 raise RuntimeError(
                     f"Hermes missing required tools: {', '.join(sorted(hermes_missing))}"
                 )
-            self.missing_final_tools = missing_expected(hermes_names, WEB_TOOLS)
+            web_schema_missing = missing_expected(hermes_names, WEB_TOOLS)
+            self.web_tools_ready = (
+                not web_schema_missing and await self.probe_web_tools()
+            )
+            self.missing_final_tools = set() if self.web_tools_ready else set(WEB_TOOLS)
             await self.memory.start()
             self.catalog = build_catalog(
                 context_tools,
@@ -221,9 +278,9 @@ class Gateway:
                     self.hermes.discover(), timeout=self.config.health_timeout_seconds
                 )
                 names = {tool.name for tool in tools}
-                return not missing_expected(
-                    names, HERMES_REQUIRED
-                ), not missing_expected(names, WEB_TOOLS)
+                core_ok = not missing_expected(names, HERMES_REQUIRED)
+                web_schema_ok = not missing_expected(names, WEB_TOOLS)
+                return core_ok, bool(core_ok and web_schema_ok and self.web_tools_ready)
             except Exception:  # noqa: BLE001 - health probe must degrade, not crash
                 return False, False
 

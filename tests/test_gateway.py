@@ -170,3 +170,45 @@ class OutputSanitizationTests(unittest.TestCase):
         self.assertIsInstance(out.content[0], types.TextContent)
         self.assertLessEqual(len(out.content[0].text), 128)
         self.assertIn("omitted", out.content[0].text.lower())
+
+
+class WebReadinessProbeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_web_probe_rejects_error_payload_even_when_mcp_is_error_false(self):
+        from unittest.mock import AsyncMock
+
+        from hermes_mcp_gateway.server import Gateway
+
+        gateway = Gateway()
+        gateway.hermes.call = AsyncMock(
+            return_value=types.CallToolResult(
+                content=[types.TextContent(text='{"error":"Log in to Nous Portal"}')],
+                is_error=False,
+            )
+        )
+        self.assertFalse(await gateway.probe_web_tools())
+
+    async def test_web_probe_accepts_search_and_extract_without_nested_errors(self):
+        from unittest.mock import AsyncMock
+
+        from hermes_mcp_gateway.server import Gateway
+
+        gateway = Gateway()
+        gateway.hermes.call = AsyncMock(
+            side_effect=[
+                types.CallToolResult(
+                    content=[
+                        types.TextContent(
+                            text='{"results":[{"url":"https://example.com"}]}'
+                        )
+                    ]
+                ),
+                types.CallToolResult(
+                    content=[
+                        types.TextContent(
+                            text='{"results":[{"url":"https://example.com","content":"ok"}]}'
+                        )
+                    ]
+                ),
+            ]
+        )
+        self.assertTrue(await gateway.probe_web_tools())
