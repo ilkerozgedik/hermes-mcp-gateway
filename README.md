@@ -58,7 +58,7 @@ The narrow upstream-supported activation path is:
      use_gateway: true
    ```
 
-Hermes advertises `web_search`/`web_extract` only when the Nous account is logged in, entitled to Tool Gateway access, and managed Firecrawl resolves successfully. Until then the process may run in degraded mode, but `/readyz` remains `503` and tunnel cutover is forbidden.
+Hermes may advertise the `web_search`/`web_extract` schemas as soon as the managed backend is selected, even before Nous authentication is usable. The gateway therefore performs one real `web_search` and one real `web_extract` smoke call at startup and treats nested provider errors as not-ready. `/readyz` becomes `200` only when those calls succeed; otherwise the process stays degraded and tunnel cutover is forbidden. Provider/auth changes require a gateway restart so readiness and the MCP schema remain stable for the process lifetime.
 
 ## Tests
 
