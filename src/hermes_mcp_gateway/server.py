@@ -60,8 +60,11 @@ def build_catalog(
                 continue
             if tool.name in catalog:
                 raise ValueError(f"tool collision: {tool.name}")
+            public_tool = tool
+            if source == "hermes" and tool.name == "vision_analyze":
+                public_tool = tool.model_copy(update={"output_schema": None})
             catalog[tool.name] = CatalogEntry(
-                tool=tool, source=source, upstream_name=tool.name
+                tool=public_tool, source=source, upstream_name=tool.name
             )
     return catalog
 
@@ -82,7 +85,7 @@ def _sanitize_structure(value: Any) -> Any:
 
 
 def normalize_result(
-    result: types.CallToolResult, *, limit: int
+    result: types.CallToolResult, *, limit: int, preserve_images: bool = False
 ) -> types.CallToolResult:
     content: list[Any] = []
     for item in result.content:
@@ -92,6 +95,8 @@ def normalize_result(
                 suffix = "\n...[truncated by hermes-mcp-gateway]"
                 text = text[: max(0, limit - len(suffix))] + suffix
             content.append(types.TextContent(text=text))
+        elif preserve_images and isinstance(item, types.ImageContent):
+            content.append(item)
         else:
             marker = (
                 f"[{type(item).__name__} omitted by hermes-mcp-gateway output policy]"
@@ -234,10 +239,15 @@ class Gateway:
                 f"Unknown or disallowed tool: {name}", limit=self.config.max_text_chars
             )
         try:
+            preserve_images = False
             if entry.source == "context":
                 result = await self.context.call(entry.upstream_name, arguments)
             elif entry.source == "hermes":
-                result = await self.hermes.call(entry.upstream_name, arguments)
+                if entry.upstream_name == "vision_analyze":
+                    result = await self.hermes.call_vision(arguments)
+                    preserve_images = True
+                else:
+                    result = await self.hermes.call(entry.upstream_name, arguments)
             elif entry.source == "capability":
                 result = await self.capabilities.call(entry.upstream_name, arguments)
             elif entry.source == "memory":
@@ -256,7 +266,11 @@ class Gateway:
                 )
             else:
                 raise RuntimeError(f"unsupported catalog source: {entry.source}")
-            return normalize_result(result, limit=self.config.max_text_chars)
+            return normalize_result(
+                result,
+                limit=self.config.max_text_chars,
+                preserve_images=preserve_images,
+            )
         except Exception as exc:  # noqa: BLE001 - upstream boundary must normalize failures
             logger.warning(
                 "upstream tool call failed: source=%s tool=%s error=%s",

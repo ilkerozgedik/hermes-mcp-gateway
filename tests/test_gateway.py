@@ -82,6 +82,21 @@ class GatewayPolicyTests(unittest.TestCase):
     def test_browser_tools_are_not_exposed(self):
         self.assertFalse({name for name in HERMES_ALLOWLIST if name.startswith("browser_")})
 
+    def test_vision_analyze_drops_broken_upstream_output_schema(self):
+        vision = types.Tool(
+            name="vision_analyze",
+            description="vision",
+            input_schema={"type": "object", "properties": {}},
+            output_schema={
+                "type": "object",
+                "properties": {"result": {"type": "string"}},
+                "required": ["result"],
+            },
+        )
+        catalog = build_catalog([], [vision], [])
+        self.assertIsNone(catalog["vision_analyze"].tool.output_schema)
+        self.assertIsNotNone(vision.output_schema)
+
     def test_public_surface_count_is_25_without_browser_tools(self):
         from hermes_mcp_gateway.config import CONTEXT_REQUIRED
 
@@ -97,6 +112,35 @@ class GatewayPolicyTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class VisionGatewayTests(unittest.IsolatedAsyncioTestCase):
+    async def test_vision_analyze_uses_native_adapter_and_preserves_image_content(self):
+        from unittest.mock import AsyncMock
+
+        from hermes_mcp_gateway.server import Gateway
+
+        gateway = Gateway()
+        gateway.catalog = build_catalog([], [tool("vision_analyze")], [])
+        gateway.hermes.call_vision = AsyncMock(
+            return_value=types.CallToolResult(
+                content=[
+                    types.TextContent(text="image ready"),
+                    types.ImageContent(data="QUJD", mime_type="image/png"),
+                ]
+            )
+        )
+        gateway.hermes.call = AsyncMock()
+
+        result = await gateway.call(
+            "vision_analyze",
+            {"image_url": "https://example.com/a.png", "question": "what?"},
+        )
+
+        self.assertFalse(result.is_error)
+        self.assertEqual([type(item).__name__ for item in result.content], ["TextContent", "ImageContent"])
+        gateway.hermes.call_vision.assert_awaited_once()
+        gateway.hermes.call.assert_not_awaited()
 
 
 class GatewayOwnedToolTests(unittest.IsolatedAsyncioTestCase):

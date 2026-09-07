@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import http.client
 import json
 import os
@@ -18,6 +19,48 @@ _PROTOCOL = "2026-07-28"
 
 def missing_expected(actual: set[str], expected: set[str] | frozenset[str]) -> set[str]:
     return set(expected) - actual
+
+
+def _vision_value_to_result(value: Any) -> types.CallToolResult:
+    if isinstance(value, str):
+        return types.CallToolResult(content=[types.TextContent(text=value)])
+    if not (
+        isinstance(value, dict)
+        and value.get("_multimodal") is True
+        and isinstance(value.get("content"), list)
+    ):
+        raise TypeError("Hermes vision returned an unsupported result shape")
+
+    content: list[types.TextContent | types.ImageContent] = []
+    for part in value["content"]:
+        if not isinstance(part, dict):
+            continue
+        if part.get("type") == "text" and isinstance(part.get("text"), str):
+            content.append(types.TextContent(text=part["text"]))
+            continue
+        if part.get("type") != "image_url":
+            continue
+        image_url = part.get("image_url")
+        data_url = image_url.get("url") if isinstance(image_url, dict) else None
+        if not isinstance(data_url, str):
+            raise ValueError("Hermes vision image payload is missing a data URL")
+        header, separator, data = data_url.partition(",")
+        if (
+            not separator
+            or not header.startswith("data:image/")
+            or not header.endswith(";base64")
+        ):
+            raise ValueError("Hermes vision returned an unsupported image URL")
+        mime_type = header[5:-7]
+        try:
+            base64.b64decode(data, validate=True)
+        except ValueError as exc:
+            raise ValueError("Hermes vision returned invalid base64 image data") from exc
+        content.append(types.ImageContent(data=data, mime_type=mime_type))
+
+    if not any(isinstance(item, types.ImageContent) for item in content):
+        raise ValueError("Hermes vision multimodal result did not contain an image")
+    return types.CallToolResult(content=content)
 
 
 class ContextModeClient:
@@ -160,6 +203,14 @@ class HermesToolsClient:
         if not isinstance(result, types.CallToolResult):
             raise TypeError(f"Hermes tool {name} returned unsupported MCP result type")
         return result
+
+    async def call_vision(self, arguments: dict[str, Any]) -> types.CallToolResult:
+        from model_tools import handle_function_call
+
+        value = await asyncio.to_thread(
+            handle_function_call, "vision_analyze", arguments
+        )
+        return _vision_value_to_result(value)
 
     async def close(self) -> None:
         if self._stack is not None:
