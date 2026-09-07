@@ -292,10 +292,9 @@ class Gateway:
             except Exception:  # noqa: BLE001 - health probe must degrade, not crash
                 return False, False
 
-        context_ok, honcho_ok, cdp_ok, hermes_state = await asyncio.gather(
+        context_ok, honcho_ok, hermes_state = await asyncio.gather(
             get_ok(self.config.context_ready_url),
             get_ok(self.config.honcho_health_url),
-            get_ok(self.config.cdp_version_url),
             hermes_state(),
         )
         hermes_core_ok, web_tools_ok = hermes_state
@@ -305,7 +304,6 @@ class Gateway:
             "web_tools": web_tools_ok,
             "hermes_capabilities": self.capabilities.check(),
             "honcho": honcho_ok,
-            "cloakbrowser_cdp": cdp_ok,
             "startup_context": self.startup.check(),
         }
         return {

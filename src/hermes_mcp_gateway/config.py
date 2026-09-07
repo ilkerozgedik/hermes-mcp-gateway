@@ -24,16 +24,6 @@ HERMES_ALLOWLIST = frozenset(
     {
         "web_search",
         "web_extract",
-        "browser_navigate",
-        "browser_snapshot",
-        "browser_click",
-        "browser_type",
-        "browser_press",
-        "browser_scroll",
-        "browser_back",
-        "browser_get_images",
-        "browser_console",
-        "browser_vision",
         "vision_analyze",
         "skills_list",
         "skill_view",
@@ -63,7 +53,6 @@ class GatewayConfig:
     context_health_url: str = "http://127.0.0.1:3050/healthz"
     context_ready_url: str = "http://127.0.0.1:3050/readyz"
     honcho_health_url: str = "http://127.0.0.1:8000/health"
-    cdp_version_url: str = "http://127.0.0.1:9222/json/version"
     hermes_python: str = "/home/hermes/.hermes/venvs/hermes/bin/python"
     hermes_home: str = "/home/hermes/.hermes"
     hermes_cwd: str = "/home/hermes/.hermes"

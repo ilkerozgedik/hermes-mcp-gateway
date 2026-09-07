@@ -79,7 +79,10 @@ class GatewayPolicyTests(unittest.TestCase):
     def test_capabilities_are_not_stateless_hermes_allowlist_tools(self):
         self.assertFalse(CAPABILITY_TOOLS & HERMES_ALLOWLIST)
 
-    def test_documented_public_surface_count_is_35(self):
+    def test_browser_tools_are_not_exposed(self):
+        self.assertFalse({name for name in HERMES_ALLOWLIST if name.startswith("browser_")})
+
+    def test_public_surface_count_is_25_without_browser_tools(self):
         from hermes_mcp_gateway.config import CONTEXT_REQUIRED
 
         self.assertEqual(
@@ -88,7 +91,7 @@ class GatewayPolicyTests(unittest.TestCase):
             + len(CAPABILITY_TOOLS)
             + len(MEMORY_TOOLS)
             + 1,
-            35,
+            25,
         )
 
 
@@ -161,6 +164,41 @@ class GatewayHealthTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("startup_context", payload["components"])
         self.assertFalse(payload["components"]["startup_context"])
         self.assertEqual(payload["status"], "degraded")
+
+
+class BrowserIndependenceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_gateway_readiness_has_no_cloakbrowser_component(self):
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from hermes_mcp_gateway.config import HERMES_REQUIRED, WEB_TOOLS
+        from hermes_mcp_gateway.server import Gateway
+
+        class Response:
+            status_code = 200
+
+        class Client:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_):
+                return False
+
+            async def get(self, _url):
+                return Response()
+
+        gateway = Gateway()
+        gateway.hermes.discover = AsyncMock(
+            return_value=[tool(name) for name in sorted(HERMES_REQUIRED | WEB_TOOLS)]
+        )
+        gateway.web_tools_ready = True
+        gateway.startup.check = MagicMock(return_value=True)
+        gateway.capabilities.check = MagicMock(return_value=True)
+        with patch(
+            "hermes_mcp_gateway.server.httpx.AsyncClient", return_value=Client()
+        ):
+            payload = await gateway.health()
+        self.assertNotIn("cloakbrowser_cdp", payload["components"])
+        self.assertEqual(payload["status"], "ok")
 
 
 class ContextReadinessContractTests(unittest.TestCase):
