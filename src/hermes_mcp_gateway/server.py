@@ -127,7 +127,7 @@ class Gateway:
     def __init__(self, config: GatewayConfig | None = None):
         self.config = config or GatewayConfig()
         self.context = ContextModeClient(
-            self.config.context_url, self.config.timeout_seconds
+            self.config.context_url, self.config.context_timeout_seconds
         )
         self.hermes = HermesToolsClient(self.config)
         self.memory = MemoryAdapter(

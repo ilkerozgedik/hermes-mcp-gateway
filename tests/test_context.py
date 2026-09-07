@@ -1,7 +1,18 @@
 import unittest
 from unittest.mock import AsyncMock
 
+from hermes_mcp_gateway.config import GatewayConfig
+from hermes_mcp_gateway.server import Gateway
 from hermes_mcp_gateway.upstreams import ContextModeClient
+
+
+class ContextTimeoutConfigTests(unittest.TestCase):
+    def test_gateway_context_timeout_exceeds_context_mode_foreground_limit(self):
+        config = GatewayConfig(timeout_seconds=30.0, context_timeout_seconds=50.0)
+        gateway = Gateway(config)
+        self.assertEqual(gateway.context.timeout, 50.0)
+        self.assertEqual(gateway.config.timeout_seconds, 30.0)
+        self.assertGreater(GatewayConfig().context_timeout_seconds, 45.0)
 
 
 class ContextModeTests(unittest.IsolatedAsyncioTestCase):

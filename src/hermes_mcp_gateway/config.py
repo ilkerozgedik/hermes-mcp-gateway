@@ -57,6 +57,7 @@ class GatewayConfig:
     hermes_home: str = "/home/hermes/.hermes"
     hermes_cwd: str = "/home/hermes/.hermes"
     timeout_seconds: float = 30.0
+    context_timeout_seconds: float = 50.0
     health_timeout_seconds: float = 3.0
     max_text_chars: int = 65_536
     max_startup_bytes: int = 64 * 1024
