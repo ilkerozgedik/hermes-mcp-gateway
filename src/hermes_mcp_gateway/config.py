@@ -52,6 +52,8 @@ MEMORY_TOOLS = frozenset(
     }
 )
 
+CAPABILITY_TOOLS = frozenset({"session_search", "delegate_task", "cronjob"})
+
 
 @dataclass(frozen=True, slots=True)
 class GatewayConfig:

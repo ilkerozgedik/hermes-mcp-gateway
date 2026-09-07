@@ -3,7 +3,13 @@ from unittest.mock import MagicMock
 
 from mcp import types
 
-from hermes_mcp_gateway.config import HERMES_ALLOWLIST, HERMES_REQUIRED, WEB_TOOLS
+from hermes_mcp_gateway.config import (
+    CAPABILITY_TOOLS,
+    HERMES_ALLOWLIST,
+    HERMES_REQUIRED,
+    MEMORY_TOOLS,
+    WEB_TOOLS,
+)
 from hermes_mcp_gateway.server import build_catalog, normalize_result
 from hermes_mcp_gateway.upstreams import missing_expected
 
@@ -69,6 +75,21 @@ class GatewayPolicyTests(unittest.TestCase):
         self.assertEqual(WEB_TOOLS, {"web_search", "web_extract"})
         self.assertFalse(WEB_TOOLS & HERMES_REQUIRED)
         self.assertEqual(HERMES_REQUIRED | WEB_TOOLS, HERMES_ALLOWLIST)
+
+    def test_capabilities_are_not_stateless_hermes_allowlist_tools(self):
+        self.assertFalse(CAPABILITY_TOOLS & HERMES_ALLOWLIST)
+
+    def test_documented_public_surface_count_is_35(self):
+        from hermes_mcp_gateway.config import CONTEXT_REQUIRED
+
+        self.assertEqual(
+            len(CONTEXT_REQUIRED)
+            + len(HERMES_ALLOWLIST)
+            + len(CAPABILITY_TOOLS)
+            + len(MEMORY_TOOLS)
+            + 1,
+            35,
+        )
 
 
 if __name__ == "__main__":
@@ -212,3 +233,63 @@ class WebReadinessProbeTests(unittest.IsolatedAsyncioTestCase):
             ]
         )
         self.assertTrue(await gateway.probe_web_tools())
+
+class HermesCapabilityGatewayTests(unittest.IsolatedAsyncioTestCase):
+    async def test_capability_tools_are_catalogued_separately_and_dispatched(self):
+        from unittest.mock import AsyncMock
+
+        from hermes_mcp_gateway.capabilities import capability_tool_schemas
+        from hermes_mcp_gateway.server import Gateway
+
+        gateway = Gateway()
+        gateway.catalog = build_catalog(
+            [], [], [], [], capability_tools=capability_tool_schemas()
+        )
+        gateway.capabilities.call = AsyncMock(
+            return_value=types.CallToolResult(content=[types.TextContent(text='{"success":true}')])
+        )
+        result = await gateway.call("session_search", {"query": "auth"})
+        self.assertFalse(result.is_error)
+        gateway.capabilities.call.assert_awaited_once_with("session_search", {"query": "auth"})
+        self.assertEqual(gateway.catalog["session_search"].source, "capability")
+
+    def test_final_surface_contains_exactly_three_capability_tools(self):
+        from hermes_mcp_gateway.capabilities import capability_tool_schemas
+        from hermes_mcp_gateway.config import CAPABILITY_TOOLS
+
+        names = {tool.name for tool in capability_tool_schemas()}
+        self.assertEqual(names, {"session_search", "delegate_task", "cronjob"})
+        self.assertEqual(names, CAPABILITY_TOOLS)
+
+
+class HermesCapabilityHealthTests(unittest.IsolatedAsyncioTestCase):
+    async def test_capability_readiness_degrades_gateway(self):
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from hermes_mcp_gateway.config import HERMES_REQUIRED, WEB_TOOLS
+        from hermes_mcp_gateway.server import Gateway
+
+        class Response:
+            status_code = 200
+
+        class Client:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_):
+                return False
+
+            async def get(self, _url):
+                return Response()
+
+        gateway = Gateway()
+        gateway.hermes.discover = AsyncMock(
+            return_value=[tool(name) for name in sorted(HERMES_REQUIRED | WEB_TOOLS)]
+        )
+        gateway.web_tools_ready = True
+        gateway.startup.check = MagicMock(return_value=True)
+        gateway.capabilities.check = MagicMock(return_value=False)
+        with patch("hermes_mcp_gateway.server.httpx.AsyncClient", return_value=Client()):
+            payload = await gateway.health()
+        self.assertFalse(payload["components"]["hermes_capabilities"])
+        self.assertEqual(payload["status"], "degraded")

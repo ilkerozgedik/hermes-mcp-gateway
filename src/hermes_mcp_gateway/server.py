@@ -23,6 +23,7 @@ from .config import (
     WEB_TOOLS,
     GatewayConfig,
 )
+from .capabilities import HermesCapabilities, capability_tool_schemas
 from .memory import MemoryAdapter, memory_tool_schemas
 from .startup import StartupContext, startup_tool_schema
 from .upstreams import ContextModeClient, HermesToolsClient, missing_expected
@@ -42,11 +43,14 @@ def build_catalog(
     hermes_tools: list[types.Tool],
     memory_tools: list[types.Tool],
     gateway_tools: list[types.Tool] | None = None,
+    *,
+    capability_tools: list[types.Tool] | None = None,
 ) -> dict[str, CatalogEntry]:
     catalog: dict[str, CatalogEntry] = {}
     groups = (
         ("context", context_tools, None),
         ("hermes", hermes_tools, HERMES_ALLOWLIST),
+        ("capability", capability_tools or [], None),
         ("memory", memory_tools, None),
         ("gateway", gateway_tools or [], None),
     )
@@ -126,6 +130,7 @@ class Gateway:
             session_id=self.config.memory_session,
             timeout=self.config.timeout_seconds,
         )
+        self.capabilities = HermesCapabilities()
         self.startup = StartupContext(max_total_bytes=self.config.max_startup_bytes)
         self.catalog: dict[str, CatalogEntry] = {}
         self.missing_final_tools: set[str] = set()
@@ -212,6 +217,7 @@ class Gateway:
                 hermes_tools,
                 memory_tool_schemas(),
                 [startup_tool_schema()],
+                capability_tools=capability_tool_schemas(),
             )
         except Exception:
             await self.close()
@@ -232,6 +238,8 @@ class Gateway:
                 result = await self.context.call(entry.upstream_name, arguments)
             elif entry.source == "hermes":
                 result = await self.hermes.call(entry.upstream_name, arguments)
+            elif entry.source == "capability":
+                result = await self.capabilities.call(entry.upstream_name, arguments)
             elif entry.source == "memory":
                 result = await self.memory.call(entry.upstream_name, arguments)
             elif entry.source == "gateway":
@@ -295,6 +303,7 @@ class Gateway:
             "context_mode": context_ok,
             "hermes_tools": hermes_core_ok,
             "web_tools": web_tools_ok,
+            "hermes_capabilities": self.capabilities.check(),
             "honcho": honcho_ok,
             "cloakbrowser_cdp": cdp_ok,
             "startup_context": self.startup.check(),
@@ -328,7 +337,10 @@ def create_app(config: GatewayConfig | None = None):
     server = Server(
         "hermes-mcp-gateway",
         version="0.1.0",
-        instructions="Single default-deny MCP gateway for Context Mode, curated Hermes tools, and Honcho memory.",
+        instructions=(
+            "Single default-deny MCP gateway for Context Mode, curated Hermes "
+            "tools, guarded Hermes capabilities, and Honcho memory."
+        ),
         lifespan=lifespan,
         on_list_tools=list_tools,
         on_call_tool=call_tool,

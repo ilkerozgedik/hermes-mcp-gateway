@@ -1,6 +1,6 @@
 # Hermes MCP Gateway
 
-Single localhost-only MCP endpoint that aggregates the existing Context Mode MCP, a strict allowlist from Hermes native tools, and Hermes/Honcho memory without patching any upstream source.
+Single localhost-only MCP endpoint that aggregates the existing Context Mode MCP, a strict allowlist from Hermes native tools, three guarded Hermes capabilities, and Hermes/Honcho memory without patching any upstream source.
 
 ## Endpoint
 
@@ -8,7 +8,7 @@ Single localhost-only MCP endpoint that aggregates the existing Context Mode MCP
 - Process health: `http://127.0.0.1:3060/healthz`
 - Final-cutover readiness: `http://127.0.0.1:3060/readyz`
 
-`healthz` stays available when a running upstream later degrades. `readyz` is `200` only when Context Mode, the curated Hermes tools including web, Honcho, and CloakBrowser CDP are all available. Tool discovery is frozen for the process lifetime; provider/config changes require a gateway restart, keeping MCP schemas stable within a running process.
+`healthz` stays available when a running upstream later degrades. `readyz` is `200` only when Context Mode, the curated Hermes tools including web, the guarded Hermes capability runtime, Honcho, and CloakBrowser CDP are all available. Tool discovery is frozen for the process lifetime; provider/config changes require a gateway restart, keeping MCP schemas stable within a running process.
 
 ## Tool policy
 
@@ -21,7 +21,15 @@ Hermes is default-deny and may expose only:
 - `vision_analyze`
 - `skills_list`, `skill_view`
 
-The gateway never exposes Hermes `terminal`, file mutation/search/process tools, delegation, session/todo state, image generation, TTS, or Kanban tools.
+The gateway never exposes Hermes `terminal`, native file mutation/search/process tools, raw memory/todo state, image generation, TTS, or Kanban tools. `session_search`, `delegate_task`, and `cronjob` are exposed only through gateway-owned guarded adapters, not through the stateless Hermes allowlist.
+
+Guarded Hermes capabilities are:
+
+- `session_search` — read-only search over the local Hermes session database. Cross-profile override is intentionally unavailable; results are historical conversation context, not proof of current external state.
+- `delegate_task` — synchronous leaf delegation only, one or two children maximum, and `confirmed=true` after explicit user approval because it spends model inference. Children inherit only Hermes `web`, `vision`, `skills`, and the `mcp-context-mode` toolset. Context Mode MCP tools are reached through Hermes' scoped `tool_search`/`tool_describe`/`tool_call` bridge; native Hermes terminal/file/code tools and recursive delegation remain out of scope.
+- `cronjob` — read-only `list`, plus guarded `create`, `update`, `pause`, `resume`, `remove`, and `run`. Mutations require `confirmed=true`. Model/provider/base-URL overrides and script/no-agent/monitor execution fields are not exposed; delivery defaults to `local`.
+
+With the currently pinned Context Mode surface, the public MCP contract is 35 tools: 11 Context Mode + 15 curated Hermes stateless + 3 guarded Hermes capabilities + 5 memory + `startup_context`.
 
 Gateway-owned startup tool:
 
@@ -72,11 +80,12 @@ Local integration gates before tunnel cutover:
 1. Context Mode `ctx_execute` smoke.
 2. Hermes browser `navigate` + `snapshot`, proving the CDP/browser PID is unchanged.
 3. `vision_analyze`, `skills_list` discovery.
-4. Honcho profile/context/search and controlled `memory_conclude` create/readback/delete.
-5. Gateway MCP initialize + `tools/list` + representative calls.
-6. `healthz` and `readyz` readback.
-7. systemd restart and enabled-state readback.
-8. Only after `readyz=200`: point Tunnel Client `main` from `3050/mcp` to `3060/mcp`; rollback is the inverse URL change plus Tunnel Client restart.
+4. Guarded capability checks: real `session_search`, read-only `cronjob list`, and scoped delegation-tool policy; one small delegated child smoke when resource headroom permits.
+5. Honcho profile/context/search and controlled `memory_conclude` create/readback/delete.
+6. Gateway MCP initialize + `tools/list` + representative calls.
+7. `healthz` and `readyz` readback.
+8. systemd restart and enabled-state readback.
+9. Only after `readyz=200`: point Tunnel Client `main` from `3050/mcp` to `3060/mcp`; rollback is the inverse URL change plus Tunnel Client restart.
 
 ## systemd
 
