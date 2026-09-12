@@ -32,7 +32,7 @@ With the currently pinned Context Mode surface, the public MCP contract is 25 to
 
 Gateway-owned startup tool:
 
-- `startup_context` — reads only the five fixed Hermes startup files (`.hermes.md`, `SOUL.md`, `MEMORY.md`, `USER.md`, and Ponytail `SKILL.md`). It accepts no path and is not a generic filesystem surface.
+- `startup_context` — reads only the five fixed Hermes startup files (`.hermes.md`, `SOUL.md`, `MEMORY.md`, `USER.md`, and canonical Ponytail `SKILL.md`). It accepts no path and is not a generic filesystem surface.
 
 Memory tools are:
 

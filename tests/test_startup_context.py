@@ -2,7 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from hermes_mcp_gateway.startup import StartupContext, startup_tool_schema
+from hermes_mcp_gateway.startup import STARTUP_PATHS, StartupContext, startup_tool_schema
 
 
 class StartupContextTests(unittest.TestCase):
@@ -15,6 +15,10 @@ class StartupContextTests(unittest.TestCase):
 
     def tearDown(self):
         self.tmp.cleanup()
+
+    def test_default_startup_paths_use_canonical_ponytail_skill(self):
+        self.assertIn(Path("/home/hermes/.hermes/skills/ponytail/SKILL.md"), STARTUP_PATHS)
+        self.assertNotIn(Path("/home/hermes/.hermes/skills/ponytail/ponytail/SKILL.md"), STARTUP_PATHS)
 
     def test_schema_accepts_no_path_or_other_arguments(self):
         tool = startup_tool_schema()
