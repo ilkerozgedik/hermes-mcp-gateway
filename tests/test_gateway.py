@@ -150,6 +150,50 @@ if __name__ == "__main__":
 
 
 class BrowserGatewayTests(unittest.IsolatedAsyncioTestCase):
+    async def test_browser_navigate_recovers_once_from_stale_camofox_tab(self):
+        from unittest.mock import patch
+
+        from hermes_mcp_gateway.config import GatewayConfig
+        from hermes_mcp_gateway.upstreams import HermesToolsClient
+
+        stale = '{"success": false, "error": "410 Client Error: Gone"}'
+        fresh = '{"success": true, "url": "https://example.com"}'
+        client = HermesToolsClient(GatewayConfig())
+        with patch(
+            "model_tools.handle_function_call", side_effect=[stale, fresh]
+        ) as dispatch, patch(
+            "hermes_mcp_gateway.upstreams._reset_camofox_session"
+        ) as reset:
+            result = await client.call_browser(
+                "browser_navigate",
+                {"url": "https://example.com"},
+                task_id="chatgpt:session-a",
+            )
+
+        self.assertEqual(result.content[0].text, fresh)
+        self.assertEqual(dispatch.call_count, 2)
+        reset.assert_called_once_with("chatgpt:session-a")
+
+    async def test_non_navigate_stale_camofox_result_is_actionable_not_410(self):
+        from unittest.mock import patch
+
+        from hermes_mcp_gateway.config import GatewayConfig
+        from hermes_mcp_gateway.upstreams import HermesToolsClient
+
+        stale = '{"success": false, "error": "410 Client Error: Gone"}'
+        client = HermesToolsClient(GatewayConfig())
+        with patch("model_tools.handle_function_call", return_value=stale), patch(
+            "hermes_mcp_gateway.upstreams._reset_camofox_session"
+        ) as reset:
+            result = await client.call_browser(
+                "browser_snapshot", {}, task_id="chatgpt:session-a"
+            )
+
+        text = result.content[0].text
+        self.assertNotIn("410", text)
+        self.assertIn('"code": "stale_tab"', text)
+        reset.assert_called_once_with("chatgpt:session-a")
+
     async def test_browser_dispatch_uses_request_scoped_task_id(self):
         from hermes_mcp_gateway.server import Gateway
 

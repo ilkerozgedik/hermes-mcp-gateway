@@ -63,6 +63,57 @@ def _vision_value_to_result(value: Any) -> types.CallToolResult:
     return types.CallToolResult(content=content)
 
 
+_BROWSER_STALE_MARKERS = (
+    "410 client error: gone",
+    "tab no longer exists",
+    "page crashed",
+    "tab was destroyed",
+    "browser was restarted",
+)
+
+
+def _browser_result_is_stale(value: str) -> bool:
+    """Recognize Camofox stale-tab responses without trusting status text alone."""
+    try:
+        payload = json.loads(value)
+    except (TypeError, json.JSONDecodeError):
+        payload = None
+
+    fragments = [value]
+    if isinstance(payload, dict):
+        fragments.extend(
+            str(payload.get(key, "")) for key in ("error", "code", "recovery")
+        )
+    haystack = " ".join(fragments).lower()
+    return any(marker in haystack for marker in _BROWSER_STALE_MARKERS)
+
+
+def _reset_camofox_session(task_id: str) -> None:
+    """Drop only the local stale-tab binding; preserve managed profile state."""
+    try:
+        from tools.browser_camofox import _drop_session
+
+        _drop_session(task_id)
+    except Exception:
+        # The gateway must remain usable with a non-Camofox Hermes installation.
+        return
+
+
+def _stale_browser_result() -> str:
+    return json.dumps(
+        {
+            "success": False,
+            "error": (
+                "The Camofox browser tab expired or was destroyed before this "
+                "operation completed. Call browser_navigate to recover it."
+            ),
+            "code": "stale_tab",
+            "retryable": True,
+            "recovery": "browser_navigate",
+        }
+    )
+
+
 class ContextModeClient:
     def __init__(self, url: str, timeout: float = 30.0):
         self.url = url
@@ -214,6 +265,21 @@ class HermesToolsClient:
         )
         if not isinstance(value, str):
             raise TypeError(f"Hermes browser tool {name} returned unsupported result type")
+
+        # Camofox deliberately returns HTTP 410 when a known tab was destroyed
+        # (browser restart, crash, or tab reaper). The pinned Hermes client only
+        # recovers 404 on navigate, so keep this compatibility boundary in the
+        # gateway: reset the local binding, retry navigate once (safe after a
+        # non-applied stale-tab response), and never replay other operations.
+        if _browser_result_is_stale(value):
+            _reset_camofox_session(task_id)
+            if name == "browser_navigate":
+                value = await asyncio.to_thread(
+                    handle_function_call, name, arguments, task_id=task_id
+                )
+            if _browser_result_is_stale(value):
+                value = _stale_browser_result()
+
         return types.CallToolResult(content=[types.TextContent(text=value)])
 
     async def call_vision(self, arguments: dict[str, Any]) -> types.CallToolResult:
