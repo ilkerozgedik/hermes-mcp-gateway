@@ -72,7 +72,9 @@ def build_catalog(
             if tool.name in catalog:
                 raise ValueError(f"tool collision: {tool.name}")
             public_tool = tool
-            if source == "hermes" and tool.name == "vision_analyze":
+            if source == "hermes" and (
+                tool.name == "vision_analyze" or tool.name in BROWSER_TOOLS
+            ):
                 public_tool = tool.model_copy(update={"output_schema": None})
             catalog[tool.name] = CatalogEntry(
                 tool=public_tool, source=source, upstream_name=tool.name

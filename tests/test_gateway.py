@@ -117,6 +117,21 @@ class GatewayPolicyTests(unittest.TestCase):
         self.assertIsNone(catalog["vision_analyze"].tool.output_schema)
         self.assertIsNotNone(vision.output_schema)
 
+    def test_browser_tools_drop_upstream_output_schema_for_text_dispatch(self):
+        browser = types.Tool(
+            name="browser_navigate",
+            description="browser",
+            input_schema={"type": "object", "properties": {}},
+            output_schema={
+                "type": "object",
+                "properties": {"result": {"type": "string"}},
+                "required": ["result"],
+            },
+        )
+        catalog = build_catalog([], [browser], [])
+        self.assertIsNone(catalog["browser_navigate"].tool.output_schema)
+        self.assertIsNotNone(browser.output_schema)
+
     def test_public_surface_count_is_35_with_camofox_browser_tools(self):
         from hermes_mcp_gateway.config import CONTEXT_REQUIRED
 
