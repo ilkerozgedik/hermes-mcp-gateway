@@ -29,11 +29,14 @@ class GatewayPolicyTests(unittest.TestCase):
             tool("skills_list"),
             tool("terminal"),
             tool("image_generate"),
+            tool("computer_use"),
         ]
         catalog = build_catalog([tool("ctx_search")], available, [])
-        self.assertEqual(set(catalog), {"ctx_search", "vision_analyze", "skills_list"})
-        self.assertNotIn("terminal", catalog)
-        self.assertNotIn("image_generate", catalog)
+        self.assertEqual(
+            set(catalog),
+            {"ctx_search", "vision_analyze", "skills_list", "terminal", "image_generate"},
+        )
+        self.assertNotIn("computer_use", catalog)
 
     def test_collision_fails_closed(self):
         with self.assertRaisesRegex(ValueError, "collision"):
@@ -60,18 +63,22 @@ class GatewayPolicyTests(unittest.TestCase):
         self.assertNotIn("abcdefghijklmnopqrstuvwxyz0123456789", text)
         self.assertIn("truncated", text)
 
-    def test_requested_allowlist_has_no_shell_or_file_tools(self):
-        forbidden = {
+    def test_requested_native_tools_are_explicitly_allowlisted(self):
+        expected = {
             "terminal",
+            "process",
             "read_file",
             "write_file",
             "patch",
             "search_files",
-            "process",
             "image_generate",
-            "text_to_speech",
+            "video_analyze",
         }
-        self.assertFalse(forbidden & HERMES_ALLOWLIST)
+        self.assertTrue(expected <= HERMES_ALLOWLIST)
+        self.assertFalse(
+            {"computer_use", "browser_exec", "browser_cdp", "skill_manage", "memory"}
+            & HERMES_ALLOWLIST
+        )
 
     def test_web_is_a_final_gate_not_a_fabricated_startup_tool(self):
         self.assertEqual(WEB_TOOLS, {"web_search", "web_extract"})
@@ -132,7 +139,7 @@ class GatewayPolicyTests(unittest.TestCase):
         self.assertIsNone(catalog["browser_navigate"].tool.output_schema)
         self.assertIsNotNone(browser.output_schema)
 
-    def test_public_surface_count_is_35_with_camofox_browser_tools(self):
+    def test_public_surface_count_is_43_with_native_tools(self):
         from hermes_mcp_gateway.config import CONTEXT_REQUIRED
 
         self.assertEqual(
@@ -141,7 +148,7 @@ class GatewayPolicyTests(unittest.TestCase):
             + len(CAPABILITY_TOOLS)
             + len(MEMORY_TOOLS)
             + 1,
-            35,
+            43,
         )
 
 

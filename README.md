@@ -12,16 +12,19 @@ Single localhost-only MCP endpoint that aggregates the existing Context Mode MCP
 
 ## Tool policy
 
-Context Mode forwards discovered `ctx_*` tools and remains the only shell/filesystem/code-execution backend.
+Context Mode forwards discovered `ctx_*` tools and remains the primary compact execution/indexing backend. The gateway also exposes a deliberately small native Hermes file/terminal surface for direct host work.
 
 Hermes is default-deny and may expose only:
 
 - `web_search`, `web_extract`
 - `vision_analyze`
 - `skills_list`, `skill_view`
+- native filesystem: `read_file`, `write_file`, `patch`, `search_files`
+- native terminal/process: `terminal`, `process`
+- media: `image_generate`, `video_analyze`
 - Camofox-compatible native browser tools: `browser_navigate`, `browser_click`, `browser_type`, `browser_press`, `browser_snapshot`, `browser_scroll`, `browser_back`, `browser_get_images`, `browser_console`, `browser_vision`
 
-The gateway does not expose `browser_exec`, `browser_cdp`, Hermes `terminal`, native file mutation/search/process tools, raw memory/todo state, image generation, TTS, or Kanban tools. `session_search`, `delegate_task`, and `cronjob` are exposed only through gateway-owned guarded adapters, not through the stateless Hermes allowlist.
+The gateway does not expose `browser_exec`, `browser_cdp`, `computer_use`, raw Hermes memory/todo state, TTS, or Kanban tools. `session_search`, `delegate_task`, and `cronjob` are exposed only through gateway-owned guarded adapters, not through the stateless Hermes allowlist.
 
 Guarded Hermes capabilities are:
 
@@ -29,7 +32,7 @@ Guarded Hermes capabilities are:
 - `delegate_task` — synchronous leaf delegation only, one or two children maximum, and `confirmed=true` after explicit user approval because it spends model inference. Children inherit only Hermes `web`, `vision`, `skills`, and the `mcp-context-mode` toolset. Context Mode MCP tools are reached through Hermes' scoped `tool_search`/`tool_describe`/`tool_call` bridge; native Hermes terminal/file/code tools and recursive delegation remain out of scope.
 - `cronjob` — read-only `list`, plus guarded `create`, `update`, `pause`, `resume`, `remove`, and `run`. Mutations require `confirmed=true`. Model/provider/base-URL overrides and script/no-agent/monitor execution fields are not exposed; delivery defaults to `local`.
 
-With the currently pinned Context Mode surface, the public MCP contract is 35 tools: 11 Context Mode + 15 curated Hermes stateless (including 10 Camofox browser tools) + 3 guarded Hermes capabilities + 5 memory + `startup_context`.
+With the currently pinned Context Mode surface, the public MCP contract is 43 tools: 11 Context Mode + 23 curated Hermes tools (including 10 Camofox browser tools, native file/terminal/process, image generation, and video analysis) + 3 guarded Hermes capabilities + 5 memory + `startup_context`.
 
 Gateway-owned startup tool:
 
@@ -76,10 +79,10 @@ PYTHONPATH=src:/srv/agents/src/hermes-agent \
 Local integration gates before tunnel cutover:
 
 1. Context Mode `ctx_execute` smoke.
-2. `vision_analyze`, `skills_list`, and the exact 10 Camofox-compatible `browser_*` tools; explicit absence of `browser_exec` and `browser_cdp`.
+2. `vision_analyze`, `skills_list`, native file/terminal/process tools, `image_generate`, `video_analyze`, and the exact 10 Camofox-compatible `browser_*` tools; explicit absence of `computer_use`, `browser_exec`, and `browser_cdp`.
 3. Guarded capability checks: real `session_search`, read-only `cronjob list`, and scoped delegation-tool policy; one small delegated child smoke when resource headroom permits.
 4. Honcho profile/context/search and controlled `memory_conclude` create/readback/delete.
-5. Gateway MCP initialize + exact 35-tool `tools/list` + representative calls, including a read-only Camofox browser navigation/snapshot smoke.
+5. Gateway MCP initialize + exact 43-tool `tools/list` + representative calls, including a read-only Camofox browser navigation/snapshot smoke.
 6. `healthz` and `readyz` readback.
 7. systemd restart and enabled-state readback.
 8. Only after `readyz=200`: point Tunnel Client `main` from `3050/mcp` to `3060/mcp`; rollback is the inverse URL change plus Tunnel Client restart.

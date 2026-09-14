@@ -12,7 +12,7 @@ from urllib.parse import urlsplit
 from mcp import ClientSession, StdioServerParameters, types
 from mcp.client.stdio import stdio_client
 
-from .config import GatewayConfig
+from .config import DIRECT_HERMES_TOOLS, DIRECT_HERMES_TOOLSETS, GatewayConfig
 
 _PROTOCOL = "2026-07-28"
 
@@ -239,11 +239,42 @@ class HermesToolsClient:
         self._stack = stack
         self._session = session
 
+    @staticmethod
+    def _discover_direct_tools() -> list[types.Tool]:
+        from model_tools import get_tool_definitions
+
+        definitions = get_tool_definitions(
+            enabled_toolsets=list(DIRECT_HERMES_TOOLSETS),
+            quiet_mode=True,
+            skip_tool_search_assembly=True,
+        ) or []
+        tools: list[types.Tool] = []
+        for definition in definitions:
+            function = definition.get("function") if isinstance(definition, dict) else None
+            if not isinstance(function, dict) or function.get("name") not in DIRECT_HERMES_TOOLS:
+                continue
+            tools.append(
+                types.Tool(
+                    name=function["name"],
+                    description=function.get("description"),
+                    input_schema=function.get("parameters")
+                    or {"type": "object", "properties": {}},
+                )
+            )
+        return tools
+
     async def discover(self) -> list[types.Tool]:
         if self._session is None:
             await self.start()
         assert self._session is not None
-        return list((await self._session.list_tools()).tools)
+        upstream, direct = await asyncio.gather(
+            self._session.list_tools(),
+            asyncio.to_thread(self._discover_direct_tools),
+        )
+        merged = {tool.name: tool for tool in upstream.tools}
+        for tool in direct:
+            merged.setdefault(tool.name, tool)
+        return list(merged.values())
 
     async def call(self, name: str, arguments: dict[str, Any]) -> types.CallToolResult:
         if self._session is None:
@@ -254,6 +285,35 @@ class HermesToolsClient:
         if not isinstance(result, types.CallToolResult):
             raise TypeError(f"Hermes tool {name} returned unsupported MCP result type")
         return result
+
+    async def call_direct(
+        self, name: str, arguments: dict[str, Any], *, task_id: str
+    ) -> types.CallToolResult:
+        from model_tools import handle_function_call
+
+        if name == "process" and arguments.get("action") != "list":
+            session_id = arguments.get("session_id")
+            if session_id:
+                from tools.process_registry import process_registry
+
+                session = process_registry.get(str(session_id))
+                if session is not None and task_id not in {
+                    session.task_id,
+                    session.session_key,
+                }:
+                    raise PermissionError("process session belongs to another MCP session")
+
+        value = await asyncio.to_thread(
+            handle_function_call,
+            name,
+            arguments,
+            task_id=task_id,
+            session_id=task_id,
+            enabled_toolsets=list(DIRECT_HERMES_TOOLSETS),
+        )
+        if not isinstance(value, str):
+            raise TypeError(f"Hermes tool {name} returned unsupported result type")
+        return types.CallToolResult(content=[types.TextContent(text=value)])
 
     async def call_browser(
         self, name: str, arguments: dict[str, Any], *, task_id: str

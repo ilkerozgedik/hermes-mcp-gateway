@@ -20,6 +20,19 @@ CONTEXT_REQUIRED = frozenset(
 
 WEB_TOOLS = frozenset({"web_search", "web_extract"})
 
+DIRECT_HERMES_TOOLSETS = ("file", "terminal", "video")
+DIRECT_HERMES_TOOLS = frozenset(
+    {
+        "read_file",
+        "write_file",
+        "patch",
+        "search_files",
+        "terminal",
+        "process",
+        "video_analyze",
+    }
+)
+
 BROWSER_TOOLS = frozenset(
     {
         "browser_navigate",
@@ -42,8 +55,9 @@ HERMES_ALLOWLIST = frozenset(
         "vision_analyze",
         "skills_list",
         "skill_view",
+        "image_generate",
     }
-) | BROWSER_TOOLS
+) | BROWSER_TOOLS | DIRECT_HERMES_TOOLS
 
 HERMES_REQUIRED = HERMES_ALLOWLIST - WEB_TOOLS
 

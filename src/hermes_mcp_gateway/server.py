@@ -19,6 +19,7 @@ from starlette.routing import Route
 from .config import (
     BROWSER_TOOLS,
     CONTEXT_REQUIRED,
+    DIRECT_HERMES_TOOLS,
     HERMES_ALLOWLIST,
     HERMES_REQUIRED,
     WEB_TOOLS,
@@ -265,6 +266,10 @@ class Gateway:
                     result = await self.hermes.call_browser(
                         entry.upstream_name, arguments, task_id=task_id or "chatgpt:gateway"
                     )
+                elif entry.upstream_name in DIRECT_HERMES_TOOLS:
+                    result = await self.hermes.call_direct(
+                        entry.upstream_name, arguments, task_id=task_id or "chatgpt:gateway"
+                    )
                 else:
                     result = await self.hermes.call(entry.upstream_name, arguments)
             elif entry.source == "capability":
@@ -363,7 +368,11 @@ def create_app(config: GatewayConfig | None = None):
         )
 
     async def call_tool(_ctx, params):
-        task_id = browser_task_id(_ctx) if params.name in BROWSER_TOOLS else None
+        task_id = (
+            browser_task_id(_ctx)
+            if params.name in BROWSER_TOOLS or params.name in DIRECT_HERMES_TOOLS
+            else None
+        )
         return await gateway.call(params.name, params.arguments or {}, task_id=task_id)
 
     server = Server(
