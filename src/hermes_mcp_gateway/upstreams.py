@@ -204,6 +204,18 @@ class HermesToolsClient:
             raise TypeError(f"Hermes tool {name} returned unsupported MCP result type")
         return result
 
+    async def call_browser(
+        self, name: str, arguments: dict[str, Any], *, task_id: str
+    ) -> types.CallToolResult:
+        from model_tools import handle_function_call
+
+        value = await asyncio.to_thread(
+            handle_function_call, name, arguments, task_id=task_id
+        )
+        if not isinstance(value, str):
+            raise TypeError(f"Hermes browser tool {name} returned unsupported result type")
+        return types.CallToolResult(content=[types.TextContent(text=value)])
+
     async def call_vision(self, arguments: dict[str, Any]) -> types.CallToolResult:
         from model_tools import handle_function_call
 

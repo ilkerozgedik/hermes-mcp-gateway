@@ -1,10 +1,12 @@
 import unittest
-from unittest.mock import MagicMock
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 
 from mcp import types
 
 from hermes_mcp_gateway.config import (
     CAPABILITY_TOOLS,
+    BROWSER_TOOLS,
     HERMES_ALLOWLIST,
     HERMES_REQUIRED,
     MEMORY_TOOLS,
@@ -79,8 +81,26 @@ class GatewayPolicyTests(unittest.TestCase):
     def test_capabilities_are_not_stateless_hermes_allowlist_tools(self):
         self.assertFalse(CAPABILITY_TOOLS & HERMES_ALLOWLIST)
 
-    def test_browser_tools_are_not_exposed(self):
-        self.assertFalse({name for name in HERMES_ALLOWLIST if name.startswith("browser_")})
+    def test_camofox_browser_tools_are_explicitly_exposed(self):
+        expected = {
+            "browser_navigate",
+            "browser_click",
+            "browser_type",
+            "browser_press",
+            "browser_snapshot",
+            "browser_scroll",
+            "browser_back",
+            "browser_get_images",
+            "browser_console",
+            "browser_vision",
+        }
+        self.assertEqual(BROWSER_TOOLS, expected)
+        self.assertEqual(
+            {name for name in HERMES_ALLOWLIST if name.startswith("browser_")},
+            expected,
+        )
+        self.assertNotIn("browser_exec", HERMES_ALLOWLIST)
+        self.assertNotIn("browser_cdp", HERMES_ALLOWLIST)
 
     def test_vision_analyze_drops_broken_upstream_output_schema(self):
         vision = types.Tool(
@@ -97,7 +117,7 @@ class GatewayPolicyTests(unittest.TestCase):
         self.assertIsNone(catalog["vision_analyze"].tool.output_schema)
         self.assertIsNotNone(vision.output_schema)
 
-    def test_public_surface_count_is_25_without_browser_tools(self):
+    def test_public_surface_count_is_35_with_camofox_browser_tools(self):
         from hermes_mcp_gateway.config import CONTEXT_REQUIRED
 
         self.assertEqual(
@@ -106,12 +126,49 @@ class GatewayPolicyTests(unittest.TestCase):
             + len(CAPABILITY_TOOLS)
             + len(MEMORY_TOOLS)
             + 1,
-            25,
+            35,
         )
 
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BrowserGatewayTests(unittest.IsolatedAsyncioTestCase):
+    async def test_browser_dispatch_uses_request_scoped_task_id(self):
+        from hermes_mcp_gateway.server import Gateway
+
+        gateway = Gateway()
+        gateway.catalog = build_catalog([], [tool("browser_navigate")], [])
+        gateway.hermes.call_browser = AsyncMock(
+            return_value=types.CallToolResult(content=[types.TextContent(text='{"success":true}')])
+        )
+        gateway.hermes.call = AsyncMock()
+
+        result = await gateway.call(
+            "browser_navigate", {"url": "https://example.com"}, task_id="chatgpt:session-a"
+        )
+
+        self.assertFalse(result.is_error)
+        gateway.hermes.call_browser.assert_awaited_once_with(
+            "browser_navigate", {"url": "https://example.com"}, task_id="chatgpt:session-a"
+        )
+        gateway.hermes.call.assert_not_awaited()
+
+    def test_browser_task_id_prefers_mcp_session_header(self):
+        from hermes_mcp_gateway.server import browser_task_id
+
+        ctx = SimpleNamespace(
+            request=SimpleNamespace(headers={"mcp-session-id": "session-a"}),
+            session=SimpleNamespace(),
+        )
+        self.assertEqual(browser_task_id(ctx), "chatgpt:session-a")
+
+    def test_browser_task_id_has_safe_fallback(self):
+        from hermes_mcp_gateway.server import browser_task_id
+
+        ctx = SimpleNamespace(request=None, session=SimpleNamespace())
+        self.assertEqual(browser_task_id(ctx), "chatgpt:gateway")
 
 
 class VisionGatewayTests(unittest.IsolatedAsyncioTestCase):

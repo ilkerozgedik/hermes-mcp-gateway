@@ -20,6 +20,21 @@ CONTEXT_REQUIRED = frozenset(
 
 WEB_TOOLS = frozenset({"web_search", "web_extract"})
 
+BROWSER_TOOLS = frozenset(
+    {
+        "browser_navigate",
+        "browser_click",
+        "browser_type",
+        "browser_press",
+        "browser_snapshot",
+        "browser_scroll",
+        "browser_back",
+        "browser_get_images",
+        "browser_console",
+        "browser_vision",
+    }
+)
+
 HERMES_ALLOWLIST = frozenset(
     {
         "web_search",
@@ -28,7 +43,7 @@ HERMES_ALLOWLIST = frozenset(
         "skills_list",
         "skill_view",
     }
-)
+) | BROWSER_TOOLS
 
 HERMES_REQUIRED = HERMES_ALLOWLIST - WEB_TOOLS
 

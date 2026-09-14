@@ -17,6 +17,7 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 
 from .config import (
+    BROWSER_TOOLS,
     CONTEXT_REQUIRED,
     HERMES_ALLOWLIST,
     HERMES_REQUIRED,
@@ -29,6 +30,16 @@ from .startup import StartupContext, startup_tool_schema
 from .upstreams import ContextModeClient, HermesToolsClient, missing_expected
 
 logger = logging.getLogger("hermes_mcp_gateway")
+
+
+def browser_task_id(ctx: Any) -> str:
+    request = getattr(ctx, "request", None)
+    headers = getattr(request, "headers", None)
+    session_id = headers.get("mcp-session-id") if headers is not None else None
+    if not session_id:
+        connection = getattr(getattr(ctx, "session", None), "_connection", None)
+        session_id = getattr(connection, "session_id", None)
+    return f"chatgpt:{session_id}" if session_id else "chatgpt:gateway"
 
 
 @dataclass(frozen=True, slots=True)
@@ -232,7 +243,9 @@ class Gateway:
         await self.context.close()
         await self.hermes.close()
 
-    async def call(self, name: str, arguments: dict[str, Any]) -> types.CallToolResult:
+    async def call(
+        self, name: str, arguments: dict[str, Any], *, task_id: str | None = None
+    ) -> types.CallToolResult:
         entry = self.catalog.get(name)
         if entry is None:
             return error_result(
@@ -246,6 +259,10 @@ class Gateway:
                 if entry.upstream_name == "vision_analyze":
                     result = await self.hermes.call_vision(arguments)
                     preserve_images = True
+                elif entry.upstream_name in BROWSER_TOOLS:
+                    result = await self.hermes.call_browser(
+                        entry.upstream_name, arguments, task_id=task_id or "chatgpt:gateway"
+                    )
                 else:
                     result = await self.hermes.call(entry.upstream_name, arguments)
             elif entry.source == "capability":
@@ -344,7 +361,8 @@ def create_app(config: GatewayConfig | None = None):
         )
 
     async def call_tool(_ctx, params):
-        return await gateway.call(params.name, params.arguments or {})
+        task_id = browser_task_id(_ctx) if params.name in BROWSER_TOOLS else None
+        return await gateway.call(params.name, params.arguments or {}, task_id=task_id)
 
     server = Server(
         "hermes-mcp-gateway",

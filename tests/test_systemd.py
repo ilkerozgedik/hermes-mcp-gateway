@@ -10,6 +10,8 @@ class SystemdTemplateTests(unittest.TestCase):
         self.assertIn("WorkingDirectory=/srv/agents/src/hermes-mcp-gateway", unit)
         self.assertIn("Environment=HOME=/home/user", unit)
         self.assertIn("Environment=HERMES_HOME=/home/user/.hermes", unit)
+        self.assertIn("EnvironmentFile=-/etc/agents/hermes.env", unit)
+        self.assertNotIn("HERMES_HOME=/home/user/.hermes/profiles/", unit)
         self.assertIn(
             "Environment=PYTHONPATH=/srv/agents/src/hermes-mcp-gateway/src:/srv/agents/src/hermes-agent",
             unit,
