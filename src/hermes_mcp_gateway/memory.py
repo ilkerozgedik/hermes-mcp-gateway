@@ -12,6 +12,8 @@ from plugins.memory.honcho import ALL_TOOL_SCHEMAS
 from plugins.memory.honcho.client import HonchoClientConfig, get_honcho_client
 from plugins.memory.honcho.session import HonchoSessionManager
 
+from .config import MEMORY_TOOLS
+
 _DURABLE_KINDS = {"preference", "decision", "architecture", "project_state"}
 _TEMPORARY_RE = re.compile(
     r"\b(for this chat|this conversation|temporary|temporarily|for now|today only|"
@@ -31,13 +33,7 @@ def memory_tool_schemas() -> list[types.Tool]:
     for schema in ALL_TOOL_SCHEMAS:
         source_name = schema["name"]
         public_name = source_name.replace("honcho_", "memory_", 1)
-        if public_name not in {
-            "memory_profile",
-            "memory_search",
-            "memory_context",
-            "memory_reasoning",
-            "memory_conclude",
-        }:
+        if public_name not in MEMORY_TOOLS:
             continue
         input_schema = json.loads(json.dumps(schema["parameters"]))
         if public_name == "memory_profile":
@@ -60,31 +56,24 @@ def memory_tool_schemas() -> list[types.Tool]:
     return tools
 
 
-class MemoryWritePolicy:
-    def validate(self, args: dict[str, Any]) -> tuple[bool, str]:
-        conclusion = str(args.get("conclusion") or "").strip()
-        delete_id = str(args.get("delete_id") or "").strip()
-        list_mode = bool(args.get("list"))
-        if sum((bool(conclusion), bool(delete_id), list_mode)) != 1:
-            return (
-                False,
-                "Exactly one of conclusion, delete_id, or list must be provided.",
-            )
-        if not conclusion:
-            return True, ""
-        kind = str(args.get("kind") or "").strip()
-        if kind not in _DURABLE_KINDS:
-            return False, "A durable memory kind is required for conclusion writes."
-        if len(conclusion) > 2000:
-            return False, "Conclusion is too large for durable memory."
-        if redact_sensitive_text(conclusion, force=True) != conclusion:
-            return False, "Sensitive data must not be persisted to memory."
-        if _TEMPORARY_RE.search(conclusion):
-            return (
-                False,
-                "Temporary conversation details must not be persisted to memory.",
-            )
+def validate_memory_write(args: dict[str, Any]) -> tuple[bool, str]:
+    conclusion = str(args.get("conclusion") or "").strip()
+    delete_id = str(args.get("delete_id") or "").strip()
+    list_mode = bool(args.get("list"))
+    if sum((bool(conclusion), bool(delete_id), list_mode)) != 1:
+        return False, "Exactly one of conclusion, delete_id, or list must be provided."
+    if not conclusion:
         return True, ""
+    kind = str(args.get("kind") or "").strip()
+    if kind not in _DURABLE_KINDS:
+        return False, "A durable memory kind is required for conclusion writes."
+    if len(conclusion) > 2000:
+        return False, "Conclusion is too large for durable memory."
+    if redact_sensitive_text(conclusion, force=True) != conclusion:
+        return False, "Sensitive data must not be persisted to memory."
+    if _TEMPORARY_RE.search(conclusion):
+        return False, "Temporary conversation details must not be persisted to memory."
+    return True, ""
 
 
 class MemoryAdapter:
@@ -101,7 +90,6 @@ class MemoryAdapter:
         self.config: HonchoClientConfig | None = None
         self.manager: HonchoSessionManager | None = None
         self.session_key = ""
-        self.policy = MemoryWritePolicy()
 
     async def start(self) -> None:
         base = HonchoClientConfig.from_global_config()
@@ -189,7 +177,7 @@ class MemoryAdapter:
             return _text_result({"result": ctx or {}})
 
         if name == "memory_conclude":
-            ok, error = self.policy.validate(args)
+            ok, error = validate_memory_write(args)
             if not ok:
                 return _text_result({"error": error}, error=True)
             delete_id = str(args.get("delete_id") or "").strip()

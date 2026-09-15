@@ -184,6 +184,9 @@ def capability_tool_schemas() -> list[types.Tool]:
     ]
 
 
+CAPABILITY_TOOLS = frozenset(tool.name for tool in capability_tool_schemas())
+
+
 def _build_delegation_parent():
     from hermes_cli.config import load_config, split_model_config_default
     from hermes_cli.fallback_config import get_fallback_chain

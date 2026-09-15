@@ -71,15 +71,11 @@ MEMORY_TOOLS = frozenset(
     }
 )
 
-CAPABILITY_TOOLS = frozenset({"session_search", "delegate_task", "cronjob"})
-
-
 @dataclass(frozen=True, slots=True)
 class GatewayConfig:
     host: str = "127.0.0.1"
     port: int = 3060
     context_url: str = "http://127.0.0.1:3050/mcp"
-    context_health_url: str = "http://127.0.0.1:3050/healthz"
     context_ready_url: str = "http://127.0.0.1:3050/readyz"
     honcho_health_url: str = "http://127.0.0.1:8000/health"
     hermes_python: str = "/home/hermes/.hermes/venvs/hermes/bin/python"

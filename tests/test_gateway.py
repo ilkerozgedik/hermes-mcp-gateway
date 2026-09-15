@@ -4,8 +4,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 from mcp import types
 
+from hermes_mcp_gateway.capabilities import CAPABILITY_TOOLS
 from hermes_mcp_gateway.config import (
-    CAPABILITY_TOOLS,
     BROWSER_TOOLS,
     HERMES_ALLOWLIST,
     HERMES_REQUIRED,
@@ -459,8 +459,7 @@ class HermesCapabilityGatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(gateway.catalog["session_search"].source, "capability")
 
     def test_final_surface_contains_exactly_three_capability_tools(self):
-        from hermes_mcp_gateway.capabilities import capability_tool_schemas
-        from hermes_mcp_gateway.config import CAPABILITY_TOOLS
+        from hermes_mcp_gateway.capabilities import CAPABILITY_TOOLS, capability_tool_schemas
 
         names = {tool.name for tool in capability_tool_schemas()}
         self.assertEqual(names, {"session_search", "delegate_task", "cronjob"})

@@ -1,6 +1,6 @@
 import unittest
 
-from hermes_mcp_gateway.memory import MemoryWritePolicy, memory_tool_schemas
+from hermes_mcp_gateway.memory import memory_tool_schemas, validate_memory_write
 
 
 class MemoryPolicyTests(unittest.TestCase):
@@ -22,22 +22,21 @@ class MemoryPolicyTests(unittest.TestCase):
         self.assertNotIn("card", profile.input_schema.get("properties", {}))
 
     def test_conclusion_write_requires_durable_kind(self):
-        policy = MemoryWritePolicy()
-        ok, _ = policy.validate(
+        ok, _ = validate_memory_write(
             {
                 "conclusion": "User prefers concise technical answers.",
                 "kind": "preference",
             }
         )
         self.assertTrue(ok)
-        ok, error = policy.validate(
+        ok, error = validate_memory_write(
             {"conclusion": "User prefers concise technical answers."}
         )
         self.assertFalse(ok)
         self.assertIn("kind", error)
 
     def test_conclusion_rejects_secrets(self):
-        ok, error = MemoryWritePolicy().validate(
+        ok, error = validate_memory_write(
             {
                 "conclusion": "API_KEY=sk-abcdefghijklmnopqrstuvwxyz0123456789",
                 "kind": "project_state",
@@ -47,7 +46,7 @@ class MemoryPolicyTests(unittest.TestCase):
         self.assertIn("sensitive", error.lower())
 
     def test_conclusion_rejects_temporary_chat_detail(self):
-        ok, error = MemoryWritePolicy().validate(
+        ok, error = validate_memory_write(
             {
                 "conclusion": "For this chat, use the temporary branch foo.",
                 "kind": "project_state",
@@ -57,9 +56,8 @@ class MemoryPolicyTests(unittest.TestCase):
         self.assertIn("temporary", error.lower())
 
     def test_list_delete_do_not_require_kind(self):
-        policy = MemoryWritePolicy()
-        self.assertTrue(policy.validate({"list": True})[0])
-        self.assertTrue(policy.validate({"delete_id": "abc123"})[0])
+        self.assertTrue(validate_memory_write({"list": True})[0])
+        self.assertTrue(validate_memory_write({"delete_id": "abc123"})[0])
 
 
 if __name__ == "__main__":
