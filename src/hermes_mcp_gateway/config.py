@@ -20,6 +20,18 @@ CONTEXT_REQUIRED = frozenset(
 
 WEB_TOOLS = frozenset({"web_search", "web_extract"})
 
+SERENA_TOOLS = frozenset(
+    {
+        "activate_project",
+        "find_declaration",
+        "find_implementations",
+        "find_referencing_symbols",
+        "find_symbol",
+        "get_diagnostics_for_file",
+        "get_symbols_overview",
+    }
+)
+
 DIRECT_HERMES_TOOLSETS = ("file", "terminal", "video")
 DIRECT_HERMES_TOOLS = frozenset(
     {
@@ -81,6 +93,8 @@ class GatewayConfig:
     hermes_python: str = "/home/hermes/.hermes/venvs/hermes/bin/python"
     hermes_home: str = "/home/hermes/.hermes"
     hermes_cwd: str = "/home/hermes/.hermes"
+    serena_command: str = "/home/hermes/.local/bin/serena"
+    serena_cwd: str = "/home/hermes"
     timeout_seconds: float = 30.0
     context_timeout_seconds: float = 50.0
     health_timeout_seconds: float = 3.0

@@ -16,19 +16,25 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
+from .capabilities import HermesCapabilities, capability_tool_schemas
 from .config import (
     BROWSER_TOOLS,
     CONTEXT_REQUIRED,
     DIRECT_HERMES_TOOLS,
     HERMES_ALLOWLIST,
     HERMES_REQUIRED,
+    SERENA_TOOLS,
     WEB_TOOLS,
     GatewayConfig,
 )
-from .capabilities import HermesCapabilities, capability_tool_schemas
 from .memory import MemoryAdapter, memory_tool_schemas
 from .startup import StartupContext, startup_tool_schema
-from .upstreams import ContextModeClient, HermesToolsClient, missing_expected
+from .upstreams import (
+    ContextModeClient,
+    HermesToolsClient,
+    SerenaClient,
+    missing_expected,
+)
 
 logger = logging.getLogger("hermes_mcp_gateway")
 
@@ -57,11 +63,13 @@ def build_catalog(
     gateway_tools: list[types.Tool] | None = None,
     *,
     capability_tools: list[types.Tool] | None = None,
+    serena_tools: list[types.Tool] | None = None,
 ) -> dict[str, CatalogEntry]:
     catalog: dict[str, CatalogEntry] = {}
     groups = (
         ("context", context_tools, None),
         ("hermes", hermes_tools, HERMES_ALLOWLIST),
+        ("serena", serena_tools or [], SERENA_TOOLS),
         ("capability", capability_tools or [], None),
         ("memory", memory_tools, None),
         ("gateway", gateway_tools or [], None),
@@ -144,6 +152,7 @@ class Gateway:
             self.config.context_url, self.config.context_timeout_seconds
         )
         self.hermes = HermesToolsClient(self.config)
+        self.serena = SerenaClient(self.config)
         self.memory = MemoryAdapter(
             ai_peer=self.config.memory_ai_peer,
             session_id=self.config.memory_session,
@@ -209,14 +218,16 @@ class Gateway:
 
     async def start(self) -> None:
         try:
-            await self.hermes.start()
-            context_tools, hermes_tools = await asyncio.gather(
-                self.context.discover(), self.hermes.discover()
+            await asyncio.gather(self.hermes.start(), self.serena.start())
+            context_tools, hermes_tools, serena_tools = await asyncio.gather(
+                self.context.discover(), self.hermes.discover(), self.serena.discover()
             )
             context_names = {tool.name for tool in context_tools}
             hermes_names = {tool.name for tool in hermes_tools}
+            serena_names = {tool.name for tool in serena_tools}
             context_missing = missing_expected(context_names, CONTEXT_REQUIRED)
             hermes_missing = missing_expected(hermes_names, HERMES_REQUIRED)
+            serena_missing = missing_expected(serena_names, SERENA_TOOLS)
             if context_missing:
                 raise RuntimeError(
                     f"Context Mode missing required tools: {', '.join(sorted(context_missing))}"
@@ -224,6 +235,10 @@ class Gateway:
             if hermes_missing:
                 raise RuntimeError(
                     f"Hermes missing required tools: {', '.join(sorted(hermes_missing))}"
+                )
+            if serena_missing:
+                raise RuntimeError(
+                    f"Serena missing required tools: {', '.join(sorted(serena_missing))}"
                 )
             web_schema_missing = missing_expected(hermes_names, WEB_TOOLS)
             self.web_tools_ready = (
@@ -237,6 +252,7 @@ class Gateway:
                 memory_tool_schemas(),
                 [startup_tool_schema()],
                 capability_tools=capability_tool_schemas(),
+                serena_tools=serena_tools,
             )
         except Exception:
             await self.close()
@@ -245,6 +261,7 @@ class Gateway:
     async def close(self) -> None:
         await self.context.close()
         await self.hermes.close()
+        await self.serena.close()
 
     async def call(
         self, name: str, arguments: dict[str, Any], *, task_id: str | None = None
@@ -272,6 +289,8 @@ class Gateway:
                     )
                 else:
                     result = await self.hermes.call(entry.upstream_name, arguments)
+            elif entry.source == "serena":
+                result = await self.serena.call(entry.upstream_name, arguments)
             elif entry.source == "capability":
                 result = await self.capabilities.call(entry.upstream_name, arguments)
             elif entry.source == "memory":
@@ -330,16 +349,20 @@ class Gateway:
             except Exception:  # noqa: BLE001 - health probe must degrade, not crash
                 return False, False
 
-        context_ok, honcho_ok, hermes_state = await asyncio.gather(
+        context_ok, honcho_ok, hermes_status, serena_ready = await asyncio.gather(
             get_ok(self.config.context_ready_url),
             get_ok(self.config.honcho_health_url),
             hermes_state(),
+            asyncio.wait_for(
+                self.serena.healthy(), timeout=self.config.health_timeout_seconds
+            ),
         )
-        hermes_core_ok, web_tools_ok = hermes_state
+        hermes_core_ok, web_tools_ok = hermes_status
         components = {
             "context_mode": context_ok,
             "hermes_tools": hermes_core_ok,
             "web_tools": web_tools_ok,
+            "serena": serena_ready,
             "hermes_capabilities": self.capabilities.check(),
             "honcho": honcho_ok,
             "startup_context": self.startup.check(),
@@ -380,7 +403,7 @@ def create_app(config: GatewayConfig | None = None):
         version="0.1.0",
         instructions=(
             "Single default-deny MCP gateway for Context Mode, curated Hermes "
-            "tools, guarded Hermes capabilities, and Honcho memory."
+            "tools, read-only Serena semantics, guarded Hermes capabilities, and Honcho memory."
         ),
         lifespan=lifespan,
         on_list_tools=list_tools,

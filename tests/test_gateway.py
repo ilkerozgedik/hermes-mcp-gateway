@@ -10,6 +10,7 @@ from hermes_mcp_gateway.config import (
     HERMES_ALLOWLIST,
     HERMES_REQUIRED,
     MEMORY_TOOLS,
+    SERENA_TOOLS,
     WEB_TOOLS,
 )
 from hermes_mcp_gateway.server import build_catalog, normalize_result
@@ -88,6 +89,35 @@ class GatewayPolicyTests(unittest.TestCase):
     def test_capabilities_are_not_stateless_hermes_allowlist_tools(self):
         self.assertFalse(CAPABILITY_TOOLS & HERMES_ALLOWLIST)
 
+    def test_serena_surface_is_read_only_semantic_subset(self):
+        self.assertEqual(
+            SERENA_TOOLS,
+            {
+                "activate_project",
+                "find_declaration",
+                "find_implementations",
+                "find_referencing_symbols",
+                "find_symbol",
+                "get_diagnostics_for_file",
+                "get_symbols_overview",
+            },
+        )
+        self.assertFalse(
+            {"execute_shell_command", "replace_symbol_body", "rename_symbol", "create_text_file"}
+            & SERENA_TOOLS
+        )
+
+    def test_catalog_exposes_only_allowlisted_serena_tools(self):
+        catalog = build_catalog(
+            [],
+            [],
+            [],
+            serena_tools=[tool("find_symbol"), tool("execute_shell_command")],
+        )
+        self.assertIn("find_symbol", catalog)
+        self.assertEqual(catalog["find_symbol"].source, "serena")
+        self.assertNotIn("execute_shell_command", catalog)
+
     def test_camofox_browser_tools_are_explicitly_exposed(self):
         expected = {
             "browser_navigate",
@@ -139,7 +169,7 @@ class GatewayPolicyTests(unittest.TestCase):
         self.assertIsNone(catalog["browser_navigate"].tool.output_schema)
         self.assertIsNotNone(browser.output_schema)
 
-    def test_public_surface_count_is_43_with_native_tools(self):
+    def test_public_surface_count_is_50_with_serena(self):
         from hermes_mcp_gateway.config import CONTEXT_REQUIRED
 
         self.assertEqual(
@@ -147,8 +177,9 @@ class GatewayPolicyTests(unittest.TestCase):
             + len(HERMES_ALLOWLIST)
             + len(CAPABILITY_TOOLS)
             + len(MEMORY_TOOLS)
+            + len(SERENA_TOOLS)
             + 1,
-            43,
+            50,
         )
 
 
@@ -358,6 +389,7 @@ class BrowserIndependenceTests(unittest.IsolatedAsyncioTestCase):
             return_value=[tool(name) for name in sorted(HERMES_REQUIRED | WEB_TOOLS)]
         )
         gateway.web_tools_ready = True
+        gateway.serena.healthy = AsyncMock(return_value=True)
         gateway.startup.check = MagicMock(return_value=True)
         gateway.capabilities.check = MagicMock(return_value=True)
         with patch(
@@ -459,7 +491,10 @@ class HermesCapabilityGatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(gateway.catalog["session_search"].source, "capability")
 
     def test_final_surface_contains_exactly_three_capability_tools(self):
-        from hermes_mcp_gateway.capabilities import CAPABILITY_TOOLS, capability_tool_schemas
+        from hermes_mcp_gateway.capabilities import (
+            CAPABILITY_TOOLS,
+            capability_tool_schemas,
+        )
 
         names = {tool.name for tool in capability_tool_schemas()}
         self.assertEqual(names, {"session_search", "delegate_task", "cronjob"})

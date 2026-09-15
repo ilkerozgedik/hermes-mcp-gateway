@@ -12,7 +12,12 @@ from urllib.parse import urlsplit
 from mcp import ClientSession, StdioServerParameters, types
 from mcp.client.stdio import stdio_client
 
-from .config import DIRECT_HERMES_TOOLS, DIRECT_HERMES_TOOLSETS, GatewayConfig
+from .config import (
+    DIRECT_HERMES_TOOLS,
+    DIRECT_HERMES_TOOLSETS,
+    SERENA_TOOLS,
+    GatewayConfig,
+)
 
 _PROTOCOL = "2026-07-28"
 
@@ -200,6 +205,91 @@ class ContextModeClient:
 
     async def close(self) -> None:
         return None
+
+
+class SerenaClient:
+    def __init__(self, config: GatewayConfig):
+        self.config = config
+        self._stack: AsyncExitStack | None = None
+        self._session: ClientSession | None = None
+
+    async def start(self) -> None:
+        if self._session is not None:
+            return
+        stack = AsyncExitStack()
+        env = {
+            key: value
+            for key, value in os.environ.items()
+            if key in {"LANG", "LC_ALL", "TERM", "TMPDIR"} or key.startswith("XDG_")
+        }
+        env.update(
+            {
+                "HOME": "/home/hermes",
+                "USER": "hermes",
+                "LOGNAME": "hermes",
+                "PATH": (
+                    "/home/hermes/.local/bin:/home/hermes/.local/npm/bin:"
+                    "/home/hermes/.cargo/bin:/home/hermes/.nix-profile/bin:"
+                    "/opt/node/bin:/usr/local/bin:/usr/bin:/bin"
+                ),
+            }
+        )
+        params = StdioServerParameters(
+            command=self.config.serena_command,
+            args=[
+                "start-mcp-server",
+                "--context",
+                "agent",
+                "--transport",
+                "stdio",
+                "--enable-web-dashboard",
+                "false",
+                "--open-web-dashboard",
+                "false",
+                "--enable-gui-log-window",
+                "false",
+                "--log-level",
+                "WARNING",
+            ],
+            cwd=self.config.serena_cwd,
+            env=env,
+        )
+        read_stream, write_stream = await stack.enter_async_context(stdio_client(params))
+        session = await stack.enter_async_context(ClientSession(read_stream, write_stream))
+        await session.initialize()
+        self._stack = stack
+        self._session = session
+
+    async def discover(self) -> list[types.Tool]:
+        if self._session is None:
+            await self.start()
+        assert self._session is not None
+        return list((await self._session.list_tools()).tools)
+
+    async def healthy(self) -> bool:
+        if self._session is None:
+            return False
+        try:
+            names = {tool.name for tool in (await self._session.list_tools()).tools}
+        except Exception:  # noqa: BLE001 - readiness probe must degrade, not crash
+            return False
+        return not missing_expected(names, SERENA_TOOLS)
+
+    async def call(self, name: str, arguments: dict[str, Any]) -> types.CallToolResult:
+        if self._session is None:
+            raise RuntimeError("Serena upstream is not started")
+        result = await self._session.call_tool(
+            name, arguments, read_timeout_seconds=self.config.timeout_seconds
+        )
+        if not isinstance(result, types.CallToolResult):
+            raise TypeError(f"Serena tool {name} returned unsupported MCP result type")
+        return result
+
+    async def close(self) -> None:
+        if self._stack is not None:
+            await self._stack.aclose()
+        self._stack = None
+        self._session = None
 
 
 class HermesToolsClient:
