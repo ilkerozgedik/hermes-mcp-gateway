@@ -1,3 +1,4 @@
+import asyncio
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -204,6 +205,54 @@ class SamchonGraphGatewayTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "allowed roots"):
                 client.resolve_cwd(outside)
 
+
+class SamchonGraphConcurrencyTests(unittest.IsolatedAsyncioTestCase):
+    async def test_health_does_not_block_on_active_graph_call(self):
+        from tempfile import TemporaryDirectory
+
+        from hermes_mcp_gateway.config import GatewayConfig
+
+        class Session:
+            def __init__(self):
+                self.active_calls = 0
+                self.started = asyncio.Event()
+                self.release = asyncio.Event()
+                self.discover_calls = 0
+
+            async def call(self, _arguments):
+                self.started.set()
+                await self.release.wait()
+                return types.CallToolResult(content=[types.TextContent(text="ok")])
+
+            async def discover(self):
+                self.discover_calls += 1
+                return [tool(SAMCHON_GRAPH_TOOL)]
+
+            async def close(self):
+                return None
+
+        with TemporaryDirectory() as root:
+            client = SamchonGraphClient(
+                GatewayConfig(
+                    samchon_graph_allowed_roots=(root,),
+                    samchon_graph_schema_cwd=root,
+                )
+            )
+            cwd = client.resolve_cwd(root)
+            session = Session()
+            client._sessions[cwd] = session  # type: ignore[assignment]
+
+            task = asyncio.create_task(client.call({"cwd": root}))
+            await asyncio.wait_for(session.started.wait(), timeout=0.5)
+            self.assertTrue(await asyncio.wait_for(client.healthy(), timeout=0.1))
+            self.assertEqual(session.discover_calls, 0)
+
+            session.release.set()
+            result = await asyncio.wait_for(task, timeout=0.5)
+            self.assertFalse(result.is_error)
+            self.assertEqual(session.active_calls, 0)
+
+
 class BrowserGatewayTests(unittest.IsolatedAsyncioTestCase):
     async def test_browser_navigate_recovers_once_from_stale_camofox_tab(self):
         from unittest.mock import patch
@@ -378,6 +427,45 @@ class GatewayHealthTests(unittest.IsolatedAsyncioTestCase):
             payload = await gateway.health()
         self.assertIn("startup_context", payload["components"])
         self.assertFalse(payload["components"]["startup_context"])
+        self.assertEqual(payload["status"], "degraded")
+
+    async def test_graph_health_timeout_degrades_instead_of_raising(self):
+        from unittest.mock import patch
+
+        from hermes_mcp_gateway.config import GatewayConfig
+        from hermes_mcp_gateway.server import Gateway
+
+        class Response:
+            status_code = 200
+
+        class Client:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_):
+                return False
+
+            async def get(self, _url):
+                return Response()
+
+        async def slow_graph_health():
+            await asyncio.sleep(1)
+            return True
+
+        gateway = Gateway(GatewayConfig(health_timeout_seconds=0.01))
+        gateway.hermes.discover = AsyncMock(
+            return_value=[tool(name) for name in sorted(HERMES_REQUIRED | WEB_TOOLS)]
+        )
+        gateway.web_tools_ready = True
+        gateway.graph.healthy = slow_graph_health
+        gateway.startup.check = MagicMock(return_value=True)
+        gateway.capabilities.check = MagicMock(return_value=True)
+        with patch(
+            "hermes_mcp_gateway.server.httpx.AsyncClient", return_value=Client()
+        ):
+            payload = await asyncio.wait_for(gateway.health(), timeout=0.2)
+
+        self.assertFalse(payload["components"]["samchon_graph"])
         self.assertEqual(payload["status"], "degraded")
 
 

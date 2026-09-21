@@ -213,6 +213,8 @@ class _SamchonGraphSession:
     def __init__(self, config: GatewayConfig, cwd: str):
         self.config = config
         self.cwd = cwd
+        self.active_calls = 0
+        self._call_lock = asyncio.Lock()
         self._stack: AsyncExitStack | None = None
         self._session: ClientSession | None = None
 
@@ -259,11 +261,12 @@ class _SamchonGraphSession:
         if self._session is None:
             await self.start()
         assert self._session is not None
-        result = await self._session.call_tool(
-            SAMCHON_GRAPH_TOOL,
-            arguments,
-            read_timeout_seconds=self.config.samchon_graph_timeout_seconds,
-        )
+        async with self._call_lock:
+            result = await self._session.call_tool(
+                SAMCHON_GRAPH_TOOL,
+                arguments,
+                read_timeout_seconds=self.config.samchon_graph_timeout_seconds,
+            )
         if not isinstance(result, types.CallToolResult):
             raise TypeError("Samchon Graph returned unsupported MCP result type")
         return result
@@ -336,6 +339,22 @@ class SamchonGraphClient:
             )
         return next(tool for tool in tools if tool.name == SAMCHON_GRAPH_TOOL)
 
+    async def _trim_sessions_unlocked(self, *, protected: str | None = None) -> None:
+        while len(self._sessions) > self.config.samchon_graph_max_sessions:
+            victim = next(
+                (
+                    (key, session)
+                    for key, session in self._sessions.items()
+                    if key != protected and session.active_calls == 0
+                ),
+                None,
+            )
+            if victim is None:
+                return
+            key, session = victim
+            del self._sessions[key]
+            await session.close()
+
     async def _get_session_unlocked(self, cwd: str) -> _SamchonGraphSession:
         existing = self._sessions.get(cwd)
         if existing is not None:
@@ -350,9 +369,7 @@ class SamchonGraphClient:
             raise
         self._sessions[cwd] = session
         self._sessions.move_to_end(cwd)
-        while len(self._sessions) > self.config.samchon_graph_max_sessions:
-            _, evicted = self._sessions.popitem(last=False)
-            await evicted.close()
+        await self._trim_sessions_unlocked(protected=cwd)
         return session
 
     async def describe(self) -> types.Tool:
@@ -362,22 +379,30 @@ class SamchonGraphClient:
             return self.public_tool(self._graph_tool(await session.discover()))
 
     async def healthy(self) -> bool:
-        async with self._lock:
-            if not self._sessions:
-                return False
-            try:
-                for session in self._sessions.values():
-                    self._graph_tool(await session.discover())
-            except Exception:  # noqa: BLE001 - readiness probe must degrade, not crash
-                return False
-            return True
+        sessions = list(self._sessions.values())
+        if not sessions:
+            return False
+        try:
+            for session in sessions:
+                if session.active_calls:
+                    continue
+                self._graph_tool(await session.discover())
+        except Exception:  # noqa: BLE001 - readiness probe must degrade, not crash
+            return False
+        return True
 
     async def call(self, arguments: dict[str, Any]) -> types.CallToolResult:
         payload = dict(arguments)
         cwd = self.resolve_cwd(payload.pop("cwd", ""))
         async with self._lock:
             session = await self._get_session_unlocked(cwd)
+            session.active_calls += 1
+        try:
             return await session.call(payload)
+        finally:
+            async with self._lock:
+                session.active_calls -= 1
+                await self._trim_sessions_unlocked()
 
     async def close(self) -> None:
         async with self._lock:

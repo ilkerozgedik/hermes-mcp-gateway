@@ -343,13 +343,19 @@ class Gateway:
             except Exception:  # noqa: BLE001 - health probe must degrade, not crash
                 return False, False
 
+        async def graph_state() -> bool:
+            try:
+                return await asyncio.wait_for(
+                    self.graph.healthy(), timeout=self.config.health_timeout_seconds
+                )
+            except Exception:  # noqa: BLE001 - health probe must degrade, not crash
+                return False
+
         context_ok, honcho_ok, hermes_status, graph_ready = await asyncio.gather(
             get_ok(self.config.context_ready_url),
             get_ok(self.config.honcho_health_url),
             hermes_state(),
-            asyncio.wait_for(
-                self.graph.healthy(), timeout=self.config.health_timeout_seconds
-            ),
+            graph_state(),
         )
         hermes_core_ok, web_tools_ok = hermes_status
         components = {
