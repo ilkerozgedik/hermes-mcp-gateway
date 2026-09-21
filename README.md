@@ -1,6 +1,6 @@
 # Hermes MCP Gateway
 
-Single localhost-only MCP endpoint that aggregates the existing Context Mode MCP, a strict allowlist from Hermes native tools, a read-only semantic subset from Serena, three guarded Hermes capabilities, and Hermes/Honcho memory without patching any upstream source.
+Single localhost-only MCP endpoint that aggregates Context Mode, a strict allowlist from Hermes native tools, one cwd-scoped Samchon Graph code-intelligence tool, three guarded Hermes capabilities, and Hermes/Honcho memory without patching any upstream source.
 
 ## Endpoint
 
@@ -26,7 +26,7 @@ Hermes is default-deny and may expose only:
 
 The gateway does not expose `browser_exec`, `browser_cdp`, `computer_use`, raw Hermes memory/todo state, TTS, or Kanban tools. `session_search`, `delegate_task`, and `cronjob` are exposed only through gateway-owned guarded adapters, not through the stateless Hermes allowlist.
 
-Serena is a separate stdio upstream. Its public surface is intentionally limited to `activate_project`, `find_declaration`, `find_implementations`, `find_referencing_symbols`, `find_symbol`, `get_diagnostics_for_file`, and `get_symbols_overview`. Serena shell/file-edit/memory tools remain default-deny.
+Samchon Graph is exposed as one `inspect_code_graph` tool. The caller supplies an absolute `cwd`; the gateway resolves it inside the allowlisted work/source roots and reuses a bounded resident MCP session per project root. The upstream MCP surface must contain exactly that one graph tool.
 
 Guarded Hermes capabilities are:
 
@@ -34,7 +34,7 @@ Guarded Hermes capabilities are:
 - `delegate_task` — synchronous leaf delegation only, one or two children maximum, and `confirmed=true` after explicit user approval because it spends model inference. Children inherit only Hermes `web`, `vision`, `skills`, and the `mcp-context-mode` toolset. Context Mode MCP tools are reached through Hermes' scoped `tool_search`/`tool_describe`/`tool_call` bridge; native Hermes terminal/file/code tools and recursive delegation remain out of scope.
 - `cronjob` — read-only `list`, plus guarded `create`, `update`, `pause`, `resume`, `remove`, and `run`. Mutations require `confirmed=true`. Model/provider/base-URL overrides and script/no-agent/monitor execution fields are not exposed; delivery defaults to `local`.
 
-With the currently pinned Context Mode surface, the public MCP contract is 50 tools: 11 Context Mode + 23 curated Hermes tools (including 10 Camofox browser tools, native file/terminal/process, image generation, and video analysis) + 7 Serena semantic-code tools + 3 guarded Hermes capabilities + 5 memory + `startup_context`.
+With the currently pinned Context Mode surface, the public MCP contract is 44 tools: 11 Context Mode + 23 curated Hermes tools (including 10 Camofox browser tools, native file/terminal/process, image generation, and video analysis) + 1 Samchon Graph `inspect_code_graph` tool + 3 guarded Hermes capabilities + 5 memory + `startup_context`.
 
 Gateway-owned startup tool:
 
@@ -84,8 +84,8 @@ Local integration gates before tunnel cutover:
 2. `vision_analyze`, `skills_list`, native file/terminal/process tools, `image_generate`, `video_analyze`, and the exact 10 Camofox-compatible `browser_*` tools; explicit absence of `computer_use`, `browser_exec`, and `browser_cdp`.
 3. Guarded capability checks: real `session_search`, read-only `cronjob list`, and scoped delegation-tool policy; one small delegated child smoke when resource headroom permits.
 4. Honcho profile/context/search and controlled `memory_conclude` create/readback/delete.
-5. Gateway MCP initialize + exact 50-tool `tools/list` + representative calls, including a read-only Camofox browser navigation/snapshot smoke and Serena semantic symbol/reference smoke.
-6. `healthz` and `readyz` readback, including Serena readiness.
+5. Gateway MCP initialize + exact 44-tool `tools/list` + representative calls, including a read-only Camofox browser navigation/snapshot smoke and cwd-scoped Samchon Graph smoke.
+6. `healthz` and `readyz` readback, including Samchon Graph readiness.
 7. systemd restart and enabled-state readback.
 8. Only after `readyz=200`: point Tunnel Client `main` from `3050/mcp` to `3060/mcp`; rollback is the inverse URL change plus Tunnel Client restart.
 

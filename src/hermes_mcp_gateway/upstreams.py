@@ -5,7 +5,9 @@ import base64
 import http.client
 import json
 import os
+from collections import OrderedDict
 from contextlib import AsyncExitStack
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -15,7 +17,7 @@ from mcp.client.stdio import stdio_client
 from .config import (
     DIRECT_HERMES_TOOLS,
     DIRECT_HERMES_TOOLSETS,
-    SERENA_TOOLS,
+    SAMCHON_GRAPH_TOOL,
     GatewayConfig,
 )
 
@@ -207,9 +209,10 @@ class ContextModeClient:
         return None
 
 
-class SerenaClient:
-    def __init__(self, config: GatewayConfig):
+class _SamchonGraphSession:
+    def __init__(self, config: GatewayConfig, cwd: str):
         self.config = config
+        self.cwd = cwd
         self._stack: AsyncExitStack | None = None
         self._session: ClientSession | None = None
 
@@ -235,23 +238,9 @@ class SerenaClient:
             }
         )
         params = StdioServerParameters(
-            command=self.config.serena_command,
-            args=[
-                "start-mcp-server",
-                "--context",
-                "agent",
-                "--transport",
-                "stdio",
-                "--enable-web-dashboard",
-                "false",
-                "--open-web-dashboard",
-                "false",
-                "--enable-gui-log-window",
-                "false",
-                "--log-level",
-                "WARNING",
-            ],
-            cwd=self.config.serena_cwd,
+            command=self.config.samchon_graph_command,
+            args=[],
+            cwd=self.cwd,
             env=env,
         )
         read_stream, write_stream = await stack.enter_async_context(stdio_client(params))
@@ -266,23 +255,17 @@ class SerenaClient:
         assert self._session is not None
         return list((await self._session.list_tools()).tools)
 
-    async def healthy(self) -> bool:
+    async def call(self, arguments: dict[str, Any]) -> types.CallToolResult:
         if self._session is None:
-            return False
-        try:
-            names = {tool.name for tool in (await self._session.list_tools()).tools}
-        except Exception:  # noqa: BLE001 - readiness probe must degrade, not crash
-            return False
-        return not missing_expected(names, SERENA_TOOLS)
-
-    async def call(self, name: str, arguments: dict[str, Any]) -> types.CallToolResult:
-        if self._session is None:
-            raise RuntimeError("Serena upstream is not started")
+            await self.start()
+        assert self._session is not None
         result = await self._session.call_tool(
-            name, arguments, read_timeout_seconds=self.config.timeout_seconds
+            SAMCHON_GRAPH_TOOL,
+            arguments,
+            read_timeout_seconds=self.config.samchon_graph_timeout_seconds,
         )
         if not isinstance(result, types.CallToolResult):
-            raise TypeError(f"Serena tool {name} returned unsupported MCP result type")
+            raise TypeError("Samchon Graph returned unsupported MCP result type")
         return result
 
     async def close(self) -> None:
@@ -290,6 +273,118 @@ class SerenaClient:
             await self._stack.aclose()
         self._stack = None
         self._session = None
+
+
+class SamchonGraphClient:
+    """Route one public graph tool to a bounded resident session per repository."""
+
+    def __init__(self, config: GatewayConfig):
+        self.config = config
+        self._sessions: OrderedDict[str, _SamchonGraphSession] = OrderedDict()
+        self._lock = asyncio.Lock()
+
+    @staticmethod
+    def public_tool(upstream: types.Tool) -> types.Tool:
+        schema = dict(upstream.input_schema or {})
+        properties = dict(schema.get("properties") or {})
+        properties["cwd"] = {
+            "type": "string",
+            "description": (
+                "Absolute project root. Must be under an allowed work/source root; "
+                "the gateway keeps a resident graph session per resolved root."
+            ),
+        }
+        required = ["cwd", *[item for item in schema.get("required", []) if item != "cwd"]]
+        schema["type"] = "object"
+        schema["properties"] = properties
+        schema["required"] = required
+        description = (upstream.description or "").rstrip()
+        if description:
+            description += "\n\n"
+        description += "Gateway routing: pass absolute project root in cwd."
+        return upstream.model_copy(
+            update={"input_schema": schema, "description": description}
+        )
+
+    def resolve_cwd(self, cwd: str) -> str:
+        if not isinstance(cwd, str) or not cwd.strip():
+            raise ValueError("cwd must be a non-empty absolute project path")
+        candidate = Path(cwd)
+        if not candidate.is_absolute():
+            raise ValueError("cwd must be an absolute project path")
+        try:
+            resolved = candidate.resolve(strict=True)
+        except OSError as exc:
+            raise ValueError(f"cwd does not exist: {cwd}") from exc
+        if not resolved.is_dir():
+            raise ValueError(f"cwd is not a directory: {resolved}")
+        roots = [Path(root).resolve() for root in self.config.samchon_graph_allowed_roots]
+        if not any(resolved == root or root in resolved.parents for root in roots):
+            raise ValueError(
+                "cwd is outside allowed roots: "
+                + ", ".join(str(root) for root in roots)
+            )
+        return str(resolved)
+
+    @staticmethod
+    def _graph_tool(tools: list[types.Tool]) -> types.Tool:
+        names = {tool.name for tool in tools}
+        if names != {SAMCHON_GRAPH_TOOL}:
+            raise RuntimeError(
+                "Samchon Graph MCP surface mismatch: "
+                f"expected only {SAMCHON_GRAPH_TOOL}, got {', '.join(sorted(names)) or 'none'}"
+            )
+        return next(tool for tool in tools if tool.name == SAMCHON_GRAPH_TOOL)
+
+    async def _get_session_unlocked(self, cwd: str) -> _SamchonGraphSession:
+        existing = self._sessions.get(cwd)
+        if existing is not None:
+            self._sessions.move_to_end(cwd)
+            return existing
+
+        session = _SamchonGraphSession(self.config, cwd)
+        try:
+            self._graph_tool(await session.discover())
+        except Exception:
+            await session.close()
+            raise
+        self._sessions[cwd] = session
+        self._sessions.move_to_end(cwd)
+        while len(self._sessions) > self.config.samchon_graph_max_sessions:
+            _, evicted = self._sessions.popitem(last=False)
+            await evicted.close()
+        return session
+
+    async def describe(self) -> types.Tool:
+        cwd = self.resolve_cwd(self.config.samchon_graph_schema_cwd)
+        async with self._lock:
+            session = await self._get_session_unlocked(cwd)
+            return self.public_tool(self._graph_tool(await session.discover()))
+
+    async def healthy(self) -> bool:
+        async with self._lock:
+            if not self._sessions:
+                return False
+            try:
+                for session in self._sessions.values():
+                    self._graph_tool(await session.discover())
+            except Exception:  # noqa: BLE001 - readiness probe must degrade, not crash
+                return False
+            return True
+
+    async def call(self, arguments: dict[str, Any]) -> types.CallToolResult:
+        payload = dict(arguments)
+        cwd = self.resolve_cwd(payload.pop("cwd", ""))
+        async with self._lock:
+            session = await self._get_session_unlocked(cwd)
+            return await session.call(payload)
+
+    async def close(self) -> None:
+        async with self._lock:
+            sessions = list(self._sessions.values())
+            self._sessions.clear()
+            for session in sessions:
+                await session.close()
 
 
 class HermesToolsClient:

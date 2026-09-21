@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "hermes-mcp-gateway"
 version = "0.1.0"
-description = "Single MCP gateway for Context Mode, Hermes tools, and Honcho memory"
+description = "Single MCP gateway for Context Mode, Samchon Graph, Hermes tools, and Honcho memory"
 requires-python = ">=3.11"
 dependencies = [
   "httpx>=0.28,<1",
