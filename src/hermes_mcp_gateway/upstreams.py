@@ -379,14 +379,14 @@ class SamchonGraphClient:
             return self.public_tool(self._graph_tool(await session.discover()))
 
     async def healthy(self) -> bool:
-        sessions = list(self._sessions.values())
-        if not sessions:
+        cwd = self.resolve_cwd(self.config.samchon_graph_schema_cwd)
+        session = self._sessions.get(cwd)
+        if session is None:
             return False
+        if session.active_calls:
+            return True
         try:
-            for session in sessions:
-                if session.active_calls:
-                    continue
-                self._graph_tool(await session.discover())
+            self._graph_tool(await session.discover())
         except Exception:  # noqa: BLE001 - readiness probe must degrade, not crash
             return False
         return True

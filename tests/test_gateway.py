@@ -252,6 +252,42 @@ class SamchonGraphConcurrencyTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(result.is_error)
             self.assertEqual(session.active_calls, 0)
 
+    async def test_health_uses_canonical_schema_session_only(self):
+        from tempfile import TemporaryDirectory
+
+        from hermes_mcp_gateway.config import GatewayConfig
+
+        class Session:
+            def __init__(self, *, broken=False):
+                self.active_calls = 0
+                self.broken = broken
+                self.discover_calls = 0
+
+            async def discover(self):
+                self.discover_calls += 1
+                if self.broken:
+                    raise RuntimeError("project index is busy or stale")
+                return [tool(SAMCHON_GRAPH_TOOL)]
+
+            async def close(self):
+                return None
+
+        with TemporaryDirectory() as schema_root, TemporaryDirectory() as project_root:
+            client = SamchonGraphClient(
+                GatewayConfig(
+                    samchon_graph_allowed_roots=(schema_root, project_root),
+                    samchon_graph_schema_cwd=schema_root,
+                )
+            )
+            schema = Session()
+            project = Session(broken=True)
+            client._sessions[client.resolve_cwd(schema_root)] = schema  # type: ignore[assignment]
+            client._sessions[client.resolve_cwd(project_root)] = project  # type: ignore[assignment]
+
+            self.assertTrue(await client.healthy())
+            self.assertEqual(schema.discover_calls, 1)
+            self.assertEqual(project.discover_calls, 0)
+
 
 class BrowserGatewayTests(unittest.IsolatedAsyncioTestCase):
     async def test_browser_navigate_recovers_once_from_stale_camofox_tab(self):
