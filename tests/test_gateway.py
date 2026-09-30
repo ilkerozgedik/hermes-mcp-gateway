@@ -1,7 +1,7 @@
 import asyncio
 import unittest
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from mcp import types
 
@@ -15,7 +15,11 @@ from hermes_mcp_gateway.config import (
     WEB_TOOLS,
 )
 from hermes_mcp_gateway.server import build_catalog, normalize_result
-from hermes_mcp_gateway.upstreams import SamchonGraphClient, missing_expected
+from hermes_mcp_gateway.upstreams import (
+    SamchonGraphClient,
+    _SamchonGraphSession,
+    missing_expected,
+)
 
 
 def tool(name: str) -> types.Tool:
@@ -204,6 +208,58 @@ class SamchonGraphGatewayTests(unittest.TestCase):
             client = SamchonGraphClient(config)
             with self.assertRaisesRegex(ValueError, "allowed roots"):
                 client.resolve_cwd(outside)
+
+
+class SamchonGraphSessionOwnershipTests(unittest.IsolatedAsyncioTestCase):
+    async def test_stdio_session_lifecycle_stays_on_owner_task(self):
+        from hermes_mcp_gateway.config import GatewayConfig
+
+        class TaskBoundContext:
+            def __init__(self, value):
+                self.value = value
+                self.owner = None
+
+            async def __aenter__(self):
+                self.owner = asyncio.current_task()
+                return self.value
+
+            async def __aexit__(self, *_exc):
+                if asyncio.current_task() is not self.owner:
+                    raise RuntimeError("cancel scope exited from different task")
+
+        class FakeClientSession:
+            async def initialize(self):
+                return None
+
+            async def list_tools(self):
+                return SimpleNamespace(tools=[tool(SAMCHON_GRAPH_TOOL)])
+
+            async def call_tool(self, name, arguments, **_kwargs):
+                self.last_call = (name, arguments)
+                return types.CallToolResult(content=[types.TextContent(text="ok")])
+
+        fake_client = FakeClientSession()
+        stdio = TaskBoundContext((object(), object()))
+
+        with (
+            patch("hermes_mcp_gateway.upstreams.stdio_client", return_value=stdio),
+            patch(
+                "hermes_mcp_gateway.upstreams.ClientSession",
+                side_effect=lambda *_args: TaskBoundContext(fake_client),
+            ),
+        ):
+            session = _SamchonGraphSession(GatewayConfig(), "/tmp")
+            await session.start()
+            discovered = await asyncio.create_task(session.discover())
+            result = await asyncio.create_task(session.call({"question": "test"}))
+            await asyncio.create_task(session.close())
+
+        self.assertEqual([item.name for item in discovered], [SAMCHON_GRAPH_TOOL])
+        self.assertFalse(result.is_error)
+        self.assertEqual(
+            fake_client.last_call,
+            (SAMCHON_GRAPH_TOOL, {"question": "test"}),
+        )
 
 
 class SamchonGraphConcurrencyTests(unittest.IsolatedAsyncioTestCase):

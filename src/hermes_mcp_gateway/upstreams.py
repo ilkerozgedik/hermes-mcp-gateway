@@ -214,14 +214,14 @@ class _SamchonGraphSession:
         self.config = config
         self.cwd = cwd
         self.active_calls = 0
-        self._call_lock = asyncio.Lock()
-        self._stack: AsyncExitStack | None = None
-        self._session: ClientSession | None = None
+        self._lifecycle_lock = asyncio.Lock()
+        self._queue: (
+            asyncio.Queue[tuple[str, dict[str, Any] | None, asyncio.Future[Any]]] | None
+        ) = None
+        self._task: asyncio.Task[None] | None = None
+        self._failure: Exception | None = None
 
-    async def start(self) -> None:
-        if self._session is not None:
-            return
-        stack = AsyncExitStack()
+    def _environment(self) -> dict[str, str]:
         env = {
             key: value
             for key, value in os.environ.items()
@@ -239,43 +239,134 @@ class _SamchonGraphSession:
                 ),
             }
         )
-        params = StdioServerParameters(
-            command=self.config.samchon_graph_command,
-            args=[],
-            cwd=self.cwd,
-            env=env,
+        return env
+
+    async def _serve(
+        self,
+        queue: asyncio.Queue[tuple[str, dict[str, Any] | None, asyncio.Future[Any]]],
+        ready: asyncio.Future[None],
+    ) -> None:
+        try:
+            async with AsyncExitStack() as stack:
+                params = StdioServerParameters(
+                    command=self.config.samchon_graph_command,
+                    args=[],
+                    cwd=self.cwd,
+                    env=self._environment(),
+                )
+                read_stream, write_stream = await stack.enter_async_context(
+                    stdio_client(params)
+                )
+                session = await stack.enter_async_context(
+                    ClientSession(read_stream, write_stream)
+                )
+                await session.initialize()
+                if not ready.done():
+                    ready.set_result(None)
+
+                while True:
+                    operation, payload, response = await queue.get()
+                    if operation == "close":
+                        if not response.done():
+                            response.set_result(None)
+                        break
+                    try:
+                        if operation == "discover":
+                            value: Any = list((await session.list_tools()).tools)
+                        elif operation == "call":
+                            result = await session.call_tool(
+                                SAMCHON_GRAPH_TOOL,
+                                payload or {},
+                                read_timeout_seconds=(
+                                    self.config.samchon_graph_timeout_seconds
+                                ),
+                            )
+                            if not isinstance(result, types.CallToolResult):
+                                raise TypeError(
+                                    "Samchon Graph returned unsupported MCP result type"
+                                )
+                            value = result
+                        else:
+                            raise RuntimeError(
+                                f"unsupported Samchon Graph session operation: {operation}"
+                            )
+                    except Exception as exc:  # noqa: BLE001 - forward upstream failure
+                        if not response.done():
+                            response.set_exception(exc)
+                    else:
+                        if not response.done():
+                            response.set_result(value)
+        except Exception as exc:  # noqa: BLE001 - owner must wake all waiters
+            self._failure = exc
+            if not ready.done():
+                ready.set_exception(exc)
+        finally:
+            failure = self._failure or RuntimeError("Samchon Graph session closed")
+            while not queue.empty():
+                _, _, response = queue.get_nowait()
+                if not response.done():
+                    response.set_exception(failure)
+
+    async def _start_unlocked(self) -> None:
+        if self._task is not None and not self._task.done():
+            return
+        loop = asyncio.get_running_loop()
+        queue: asyncio.Queue[tuple[str, dict[str, Any] | None, asyncio.Future[Any]]] = (
+            asyncio.Queue()
         )
-        read_stream, write_stream = await stack.enter_async_context(stdio_client(params))
-        session = await stack.enter_async_context(ClientSession(read_stream, write_stream))
-        await session.initialize()
-        self._stack = stack
-        self._session = session
+        ready: asyncio.Future[None] = loop.create_future()
+        self._failure = None
+        self._queue = queue
+        self._task = asyncio.create_task(
+            self._serve(queue, ready),
+            name=f"samchon-graph:{self.cwd}",
+        )
+        await asyncio.shield(ready)
+
+    async def start(self) -> None:
+        async with self._lifecycle_lock:
+            await self._start_unlocked()
+
+    async def _request(
+        self, operation: str, payload: dict[str, Any] | None = None
+    ) -> Any:
+        loop = asyncio.get_running_loop()
+        async with self._lifecycle_lock:
+            await self._start_unlocked()
+            assert self._queue is not None
+            response: asyncio.Future[Any] = loop.create_future()
+            self._queue.put_nowait((operation, payload, response))
+        return await response
 
     async def discover(self) -> list[types.Tool]:
-        if self._session is None:
-            await self.start()
-        assert self._session is not None
-        return list((await self._session.list_tools()).tools)
+        result = await self._request("discover")
+        if not isinstance(result, list) or not all(
+            isinstance(tool, types.Tool) for tool in result
+        ):
+            raise TypeError("Samchon Graph returned unsupported tool discovery result")
+        return result
 
     async def call(self, arguments: dict[str, Any]) -> types.CallToolResult:
-        if self._session is None:
-            await self.start()
-        assert self._session is not None
-        async with self._call_lock:
-            result = await self._session.call_tool(
-                SAMCHON_GRAPH_TOOL,
-                arguments,
-                read_timeout_seconds=self.config.samchon_graph_timeout_seconds,
-            )
+        result = await self._request("call", arguments)
         if not isinstance(result, types.CallToolResult):
             raise TypeError("Samchon Graph returned unsupported MCP result type")
         return result
 
     async def close(self) -> None:
-        if self._stack is not None:
-            await self._stack.aclose()
-        self._stack = None
-        self._session = None
+        loop = asyncio.get_running_loop()
+        async with self._lifecycle_lock:
+            task = self._task
+            queue = self._queue
+            if task is None:
+                return
+            if not task.done() and queue is not None:
+                response: asyncio.Future[Any] = loop.create_future()
+                queue.put_nowait(("close", None, response))
+                await response
+            await task
+            self._task = None
+            self._queue = None
+            self._failure = None
 
 
 class SamchonGraphClient:
