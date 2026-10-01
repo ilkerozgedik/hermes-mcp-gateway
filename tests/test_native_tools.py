@@ -17,7 +17,7 @@ class DirectHermesToolTests(unittest.IsolatedAsyncioTestCase):
                 "patch",
                 "search_files",
                 "terminal",
-                "process",
+                "process_manage",
                 "video_analyze",
             },
         )
@@ -51,7 +51,7 @@ class DirectHermesToolTests(unittest.IsolatedAsyncioTestCase):
         with patch("tools.process_registry.process_registry.get", return_value=foreign):
             with self.assertRaisesRegex(PermissionError, "another MCP session"):
                 await client.call_direct(
-                    "process",
+                    "process_manage",
                     {"action": "kill", "session_id": "proc_foreign"},
                     task_id="chatgpt:session-a",
                 )
@@ -67,7 +67,7 @@ class DirectHermesToolTests(unittest.IsolatedAsyncioTestCase):
         with patch("tools.process_registry.process_registry.get", return_value=owned):
             with patch("model_tools.handle_function_call", return_value='{"status":"running"}'):
                 result = await client.call_direct(
-                    "process",
+                    "process_manage",
                     {"action": "poll", "session_id": "proc_owned"},
                     task_id="chatgpt:session-a",
                 )
@@ -88,7 +88,7 @@ class DirectHermesToolTests(unittest.IsolatedAsyncioTestCase):
                     task_id="chatgpt:session-a",
                 )
 
-    def test_discover_direct_tools_maps_process_manage_to_process(self):
+    def test_discover_direct_tools_preserves_process_manage_name(self):
         definitions = [
             {"type": "function", "function": {"name": "process_manage", "description": "manage processes"}},
             {"type": "function", "function": {"name": "terminal", "description": "run shell"}},
@@ -97,8 +97,8 @@ class DirectHermesToolTests(unittest.IsolatedAsyncioTestCase):
         with patch("model_tools.get_tool_definitions", return_value=definitions):
             tools = HermesToolsClient._discover_direct_tools()
         names = [t.name for t in tools]
-        self.assertIn("process", names)
-        self.assertNotIn("process_manage", names)
+        self.assertIn("process_manage", names)
+        self.assertNotIn("process", names)
         self.assertIn("terminal", names)
         self.assertNotIn("unexpected", names)
 

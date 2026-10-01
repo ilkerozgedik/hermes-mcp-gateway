@@ -78,13 +78,7 @@ def build_catalog(
     for source, tools, allowlist in groups:
         for tool in tools:
             canonical_name = tool.name
-            if canonical_name == "image_gen" and "image_generate" in (allowlist or set()):
-                canonical_name = "image_generate"
-            if (
-                allowlist is not None
-                and tool.name not in allowlist
-                and canonical_name not in allowlist
-            ):
+            if allowlist is not None and canonical_name not in allowlist:
                 continue
             if canonical_name in catalog:
                 raise ValueError(f"tool collision: {canonical_name}")

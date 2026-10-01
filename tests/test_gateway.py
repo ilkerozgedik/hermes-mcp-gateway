@@ -44,16 +44,15 @@ class GatewayPolicyTests(unittest.TestCase):
         )
         self.assertNotIn("computer_use", catalog)
 
-    def test_build_catalog_aliases_image_gen_to_image_generate(self):
+    def test_build_catalog_does_not_alias_noncanonical_image_tool(self):
         available = [
             tool("vision_analyze"),
             tool("skills_list"),
             tool("image_gen"),
         ]
         catalog = build_catalog([], available, [])
-        self.assertIn("image_generate", catalog)
-        self.assertEqual(catalog["image_generate"].upstream_name, "image_gen")
-        self.assertEqual(catalog["image_generate"].tool.name, "image_generate")
+        self.assertNotIn("image_generate", catalog)
+        self.assertNotIn("image_gen", catalog)
 
     def test_collision_fails_closed(self):
         with self.assertRaisesRegex(ValueError, "collision"):
@@ -83,7 +82,7 @@ class GatewayPolicyTests(unittest.TestCase):
     def test_requested_native_tools_are_explicitly_allowlisted(self):
         expected = {
             "terminal",
-            "process",
+            "process_manage",
             "read_file",
             "write_file",
             "patch",

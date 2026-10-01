@@ -20,7 +20,7 @@ Hermes is default-deny and may expose only:
 - `vision_analyze`
 - `skills_list`, `skill_view`
 - native filesystem: `read_file`, `write_file`, `patch`, `search_files`
-- native terminal/process: `terminal`, `process`
+- native terminal/process: `terminal`, `process_manage`
 - media: `image_generate`, `video_analyze`
 - Camofox-compatible native browser tools: `browser_navigate`, `browser_click`, `browser_type`, `browser_press`, `browser_snapshot`, `browser_scroll`, `browser_back`, `browser_get_images`, `browser_console`, `browser_vision`
 
@@ -34,7 +34,7 @@ Guarded Hermes capabilities are:
 - `delegate_task` — synchronous leaf delegation only, one or two children maximum, and `confirmed=true` after explicit user approval because it spends model inference. Children inherit only Hermes `web`, `vision`, `skills`, and the `mcp-context-mode` toolset. Context Mode MCP tools are reached through Hermes' scoped `tool_search`/`tool_describe`/`tool_call` bridge; native Hermes terminal/file/code tools and recursive delegation remain out of scope.
 - `cronjob` — read-only `list`, plus guarded `create`, `update`, `pause`, `resume`, `remove`, and `run`. Mutations require `confirmed=true`. Model/provider/base-URL overrides and script/no-agent/monitor execution fields are not exposed; delivery defaults to `local`.
 
-With the currently pinned Context Mode surface, the public MCP contract is 44 tools: 11 Context Mode + 23 curated Hermes tools (including 10 Camofox browser tools, native file/terminal/process, image generation, and video analysis) + 1 Samchon Graph `inspect_code_graph` tool + 3 guarded Hermes capabilities + 5 memory + `startup_context`.
+With the currently pinned Context Mode surface, the public MCP contract is 44 tools: 11 Context Mode + 23 curated Hermes tools (including 10 Camofox browser tools, native file/terminal/process_manage, image generation, and video analysis) + 1 Samchon Graph `inspect_code_graph` tool + 3 guarded Hermes capabilities + 5 memory + `startup_context`.
 
 Gateway-owned startup tool:
 
@@ -81,7 +81,7 @@ PYTHONPATH=src:/srv/agents/src/hermes-agent \
 Local integration gates before tunnel cutover:
 
 1. Context Mode `ctx_execute` smoke.
-2. `vision_analyze`, `skills_list`, native file/terminal/process tools, `image_generate`, `video_analyze`, and the exact 10 Camofox-compatible `browser_*` tools; explicit absence of `computer_use`, `browser_exec`, and `browser_cdp`.
+2. `vision_analyze`, `skills_list`, native file/terminal/`process_manage` tools, `image_generate`, `video_analyze`, and the exact 10 Camofox-compatible `browser_*` tools; explicit absence of `computer_use`, `browser_exec`, and `browser_cdp`.
 3. Guarded capability checks: real `session_search`, read-only `cronjob list`, and scoped delegation-tool policy; one small delegated child smoke when resource headroom permits.
 4. Honcho profile/context/search and controlled `memory_conclude` create/readback/delete.
 5. Gateway MCP initialize + exact 44-tool `tools/list` + representative calls, including a read-only Camofox browser navigation/snapshot smoke and cwd-scoped Samchon Graph smoke.

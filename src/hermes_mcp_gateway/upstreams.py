@@ -566,8 +566,6 @@ class HermesToolsClient:
             if not isinstance(function, dict):
                 continue
             name = function.get("name")
-            if name == "process_manage" and "process" in DIRECT_HERMES_TOOLS:
-                name = "process"
             if name not in DIRECT_HERMES_TOOLS:
                 continue
             if any(t.name == name for t in tools):
@@ -610,7 +608,7 @@ class HermesToolsClient:
     ) -> types.CallToolResult:
         from model_tools import handle_function_call
 
-        if name in {"process", "process_manage"} and arguments.get("action") != "list":
+        if name == "process_manage" and arguments.get("action") != "list":
             session_id = arguments.get("session_id")
             if session_id:
                 from tools.process_registry import process_registry

@@ -30,7 +30,7 @@ DIRECT_HERMES_TOOLS = frozenset(
         "patch",
         "search_files",
         "terminal",
-        "process",
+        "process_manage",
         "video_analyze",
     }
 )
@@ -50,7 +50,7 @@ BROWSER_TOOLS = frozenset(
     }
 )
 
-IMAGE_TOOLS = frozenset({"image_generate", "image_gen"})
+IMAGE_TOOLS = frozenset({"image_generate"})
 
 HERMES_ALLOWLIST = frozenset(
     {
