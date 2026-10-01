@@ -50,6 +50,8 @@ BROWSER_TOOLS = frozenset(
     }
 )
 
+IMAGE_TOOLS = frozenset({"image_generate", "image_gen"})
+
 HERMES_ALLOWLIST = frozenset(
     {
         "web_search",

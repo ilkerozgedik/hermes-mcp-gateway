@@ -23,6 +23,7 @@ from .config import (
     DIRECT_HERMES_TOOLS,
     HERMES_ALLOWLIST,
     HERMES_REQUIRED,
+    IMAGE_TOOLS,
     SAMCHON_GRAPH_TOOL,
     WEB_TOOLS,
     GatewayConfig,
@@ -76,16 +77,27 @@ def build_catalog(
     )
     for source, tools, allowlist in groups:
         for tool in tools:
-            if allowlist is not None and tool.name not in allowlist:
-                continue
-            if tool.name in catalog:
-                raise ValueError(f"tool collision: {tool.name}")
-            public_tool = tool
-            if source == "hermes" and (
-                tool.name == "vision_analyze" or tool.name in BROWSER_TOOLS
+            canonical_name = tool.name
+            if canonical_name == "image_gen" and "image_generate" in (allowlist or set()):
+                canonical_name = "image_generate"
+            if (
+                allowlist is not None
+                and tool.name not in allowlist
+                and canonical_name not in allowlist
             ):
-                public_tool = tool.model_copy(update={"output_schema": None})
-            catalog[tool.name] = CatalogEntry(
+                continue
+            if canonical_name in catalog:
+                raise ValueError(f"tool collision: {canonical_name}")
+            public_tool = (
+                tool
+                if tool.name == canonical_name
+                else tool.model_copy(update={"name": canonical_name})
+            )
+            if source == "hermes" and (
+                canonical_name == "vision_analyze" or canonical_name in BROWSER_TOOLS
+            ):
+                public_tool = public_tool.model_copy(update={"output_schema": None})
+            catalog[canonical_name] = CatalogEntry(
                 tool=public_tool, source=source, upstream_name=tool.name
             )
     return catalog
@@ -226,6 +238,8 @@ class Gateway:
             hermes_names = {tool.name for tool in hermes_tools}
             context_missing = missing_expected(context_names, CONTEXT_REQUIRED)
             hermes_missing = missing_expected(hermes_names, HERMES_REQUIRED)
+            if not (hermes_names & IMAGE_TOOLS):
+                hermes_missing.add("image_generate")
             if context_missing:
                 raise RuntimeError(
                     f"Context Mode missing required tools: {', '.join(sorted(context_missing))}"
@@ -337,7 +351,10 @@ class Gateway:
                     self.hermes.discover(), timeout=self.config.health_timeout_seconds
                 )
                 names = {tool.name for tool in tools}
-                core_ok = not missing_expected(names, HERMES_REQUIRED)
+                missing = missing_expected(names, HERMES_REQUIRED)
+                if not (names & IMAGE_TOOLS):
+                    missing.add("image_generate")
+                core_ok = not missing
                 web_schema_ok = not missing_expected(names, WEB_TOOLS)
                 return core_ok, bool(core_ok and web_schema_ok and self.web_tools_ready)
             except Exception:  # noqa: BLE001 - health probe must degrade, not crash

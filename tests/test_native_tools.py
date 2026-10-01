@@ -73,6 +73,35 @@ class DirectHermesToolTests(unittest.IsolatedAsyncioTestCase):
                 )
         self.assertEqual(result.content[0].text, '{"status":"running"}')
 
+    async def test_process_manage_operations_cannot_cross_mcp_sessions(self):
+        client = object.__new__(HermesToolsClient)
+        foreign = type(
+            "Session",
+            (),
+            {"task_id": "default", "session_key": "chatgpt:session-b"},
+        )()
+        with patch("tools.process_registry.process_registry.get", return_value=foreign):
+            with self.assertRaisesRegex(PermissionError, "another MCP session"):
+                await client.call_direct(
+                    "process_manage",
+                    {"action": "kill", "session_id": "proc_foreign"},
+                    task_id="chatgpt:session-a",
+                )
+
+    def test_discover_direct_tools_maps_process_manage_to_process(self):
+        definitions = [
+            {"type": "function", "function": {"name": "process_manage", "description": "manage processes"}},
+            {"type": "function", "function": {"name": "terminal", "description": "run shell"}},
+            {"type": "function", "function": {"name": "unexpected", "description": "ignore"}},
+        ]
+        with patch("model_tools.get_tool_definitions", return_value=definitions):
+            tools = HermesToolsClient._discover_direct_tools()
+        names = [t.name for t in tools]
+        self.assertIn("process", names)
+        self.assertNotIn("process_manage", names)
+        self.assertIn("terminal", names)
+        self.assertNotIn("unexpected", names)
+
 
 if __name__ == "__main__":
     unittest.main()
