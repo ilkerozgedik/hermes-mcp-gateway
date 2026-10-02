@@ -28,6 +28,7 @@ from .config import (
     WEB_TOOLS,
     GatewayConfig,
 )
+from .lsp import LSPAdapter, lsp_tool_schemas
 from .memory import MemoryAdapter, memory_tool_schemas
 from .startup import StartupContext, startup_tool_schema
 from .upstreams import (
@@ -65,12 +66,14 @@ def build_catalog(
     *,
     capability_tools: list[types.Tool] | None = None,
     graph_tools: list[types.Tool] | None = None,
+    lsp_tools: list[types.Tool] | None = None,
 ) -> dict[str, CatalogEntry]:
     catalog: dict[str, CatalogEntry] = {}
     groups = (
         ("context", context_tools, None),
         ("hermes", hermes_tools, HERMES_ALLOWLIST),
         ("graph", graph_tools or [], {SAMCHON_GRAPH_TOOL}),
+        ("lsp", lsp_tools or [], None),
         ("capability", capability_tools or [], None),
         ("memory", memory_tools, None),
         ("gateway", gateway_tools or [], None),
@@ -159,6 +162,10 @@ class Gateway:
         )
         self.hermes = HermesToolsClient(self.config)
         self.graph = SamchonGraphClient(self.config)
+        self.lsp = LSPAdapter(
+            allowed_roots=self.config.samchon_graph_allowed_roots,
+            timeout_seconds=self.config.timeout_seconds,
+        )
         self.memory = MemoryAdapter(
             ai_peer=self.config.memory_ai_peer,
             session_id=self.config.memory_session,
@@ -255,6 +262,7 @@ class Gateway:
                 [startup_tool_schema()],
                 capability_tools=capability_tool_schemas(),
                 graph_tools=[graph_tool],
+                lsp_tools=lsp_tool_schemas(),
             )
         except Exception:
             await self.close()
@@ -264,6 +272,7 @@ class Gateway:
         await self.context.close()
         await self.hermes.close()
         await self.graph.close()
+        await asyncio.to_thread(self.lsp.close)
 
     async def call(
         self, name: str, arguments: dict[str, Any], *, task_id: str | None = None
@@ -293,6 +302,18 @@ class Gateway:
                     result = await self.hermes.call(entry.upstream_name, arguments)
             elif entry.source == "graph":
                 result = await self.graph.call(arguments)
+            elif entry.source == "lsp":
+                payload = await asyncio.to_thread(
+                    self.lsp.call, entry.upstream_name, arguments
+                )
+                result = types.CallToolResult(
+                    content=[
+                        types.TextContent(
+                            text=json.dumps(payload, ensure_ascii=False, default=str)
+                        )
+                    ],
+                    structured_content=payload,
+                )
             elif entry.source == "capability":
                 result = await self.capabilities.call(entry.upstream_name, arguments)
             elif entry.source == "memory":
@@ -374,6 +395,7 @@ class Gateway:
             "hermes_tools": hermes_core_ok,
             "web_tools": web_tools_ok,
             "samchon_graph": graph_ready,
+            "hermes_lsp": self.lsp.healthy(),
             "hermes_capabilities": self.capabilities.check(),
             "honcho": honcho_ok,
             "startup_context": self.startup.check(),

@@ -14,6 +14,7 @@ from hermes_mcp_gateway.config import (
     SAMCHON_GRAPH_TOOL,
     WEB_TOOLS,
 )
+from hermes_mcp_gateway.lsp import LSP_TOOLS, lsp_tool_schemas
 from hermes_mcp_gateway.server import build_catalog, normalize_result
 from hermes_mcp_gateway.upstreams import (
     SamchonGraphClient,
@@ -118,6 +119,12 @@ class GatewayPolicyTests(unittest.TestCase):
         self.assertEqual(catalog["inspect_code_graph"].source, "graph")
         self.assertNotIn("unexpected_tool", catalog)
 
+
+    def test_lsp_tools_are_catalogued_as_read_only_gateway_adapter(self):
+        catalog = build_catalog([], [], [], lsp_tools=lsp_tool_schemas())
+        self.assertEqual({name for name, entry in catalog.items() if entry.source == "lsp"}, LSP_TOOLS)
+        self.assertFalse(any(token in name for name in LSP_TOOLS for token in ("rename", "format", "action")))
+
     def test_camofox_browser_tools_are_explicitly_exposed(self):
         expected = {
             "browser_navigate",
@@ -169,7 +176,7 @@ class GatewayPolicyTests(unittest.TestCase):
         self.assertIsNone(catalog["browser_navigate"].tool.output_schema)
         self.assertIsNotNone(browser.output_schema)
 
-    def test_public_surface_count_is_44_with_samchon_graph(self):
+    def test_public_surface_count_is_50_with_lsp_and_samchon_graph(self):
         from hermes_mcp_gateway.config import CONTEXT_REQUIRED
 
         self.assertEqual(
@@ -178,8 +185,9 @@ class GatewayPolicyTests(unittest.TestCase):
             + len(CAPABILITY_TOOLS)
             + len(MEMORY_TOOLS)
             + 1  # Samchon Graph
+            + len(LSP_TOOLS)
             + 1,  # startup_context
-            44,
+            50,
         )
 
 
@@ -739,3 +747,52 @@ class HermesCapabilityHealthTests(unittest.IsolatedAsyncioTestCase):
             payload = await gateway.health()
         self.assertFalse(payload["components"]["hermes_capabilities"])
         self.assertEqual(payload["status"], "degraded")
+
+class LSPGatewayTests(unittest.IsolatedAsyncioTestCase):
+    async def test_lsp_tool_dispatches_through_gateway_adapter(self):
+        from hermes_mcp_gateway.server import Gateway
+
+        gateway = Gateway()
+        gateway.catalog = build_catalog([], [], [], lsp_tools=lsp_tool_schemas())
+        gateway.lsp.call = MagicMock(
+            return_value={"file": "repo/a.py", "result": {"contents": "ok"}}
+        )
+        result = await gateway.call(
+            "lsp_hover",
+            {"file": "/home/hermes/work/repo/a.py", "line": 1, "column": 1},
+        )
+        self.assertFalse(result.is_error)
+        self.assertEqual(result.structured_content["file"], "repo/a.py")
+        gateway.lsp.call.assert_called_once_with(
+            "lsp_hover",
+            {"file": "/home/hermes/work/repo/a.py", "line": 1, "column": 1},
+        )
+
+    async def test_lsp_health_component_does_not_require_every_server_installed(self):
+        from hermes_mcp_gateway.server import Gateway
+
+        gateway = Gateway()
+        gateway.lsp.healthy = MagicMock(return_value=True)
+        gateway.hermes.discover = AsyncMock(
+            return_value=[tool(name) for name in sorted(HERMES_REQUIRED | WEB_TOOLS)]
+        )
+        gateway.web_tools_ready = True
+        gateway.graph.healthy = AsyncMock(return_value=True)
+        gateway.capabilities.check = MagicMock(return_value=True)
+        gateway.startup.check = MagicMock(return_value=True)
+
+        class Response:
+            status_code = 200
+
+        class Client:
+            async def __aenter__(self):
+                return self
+            async def __aexit__(self, *_):
+                return False
+            async def get(self, _url):
+                return Response()
+
+        with patch("hermes_mcp_gateway.server.httpx.AsyncClient", return_value=Client()):
+            payload = await gateway.health()
+        self.assertTrue(payload["components"]["hermes_lsp"])
+        self.assertEqual(payload["status"], "ok")
