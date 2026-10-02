@@ -16,9 +16,8 @@ class StartupContextTests(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def test_default_startup_paths_use_canonical_ponytail_skill(self):
-        self.assertIn(Path("/home/hermes/.hermes/skills/ponytail/SKILL.md"), STARTUP_PATHS)
-        self.assertNotIn(Path("/home/hermes/.hermes/skills/ponytail/ponytail/SKILL.md"), STARTUP_PATHS)
+    def test_default_startup_paths_exclude_retired_ponytail_skill(self):
+        self.assertNotIn(Path("/home/hermes/.hermes/skills/ponytail/SKILL.md"), STARTUP_PATHS)
 
     def test_schema_accepts_no_path_or_other_arguments(self):
         tool = startup_tool_schema()

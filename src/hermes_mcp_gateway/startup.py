@@ -13,7 +13,6 @@ STARTUP_PATHS = (
     Path("/home/hermes/.hermes/SOUL.md"),
     Path("/home/hermes/.hermes/memories/MEMORY.md"),
     Path("/home/hermes/.hermes/memories/USER.md"),
-    Path("/home/hermes/.hermes/skills/ponytail/SKILL.md"),
 )
 
 
