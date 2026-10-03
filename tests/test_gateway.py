@@ -480,7 +480,6 @@ class GatewayOwnedToolTests(unittest.IsolatedAsyncioTestCase):
 
         catalog = build_catalog([], [], [], [startup_tool_schema()])
         self.assertEqual(catalog["startup_context"].source, "gateway")
-        self.assertEqual(catalog["startup_context"].upstream_name, "startup_context")
         self.assertIsInstance(catalog["startup_context"], CatalogEntry)
 
         gateway = Gateway()

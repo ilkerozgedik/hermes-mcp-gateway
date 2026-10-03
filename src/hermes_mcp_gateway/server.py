@@ -55,7 +55,6 @@ def browser_task_id(ctx: Any) -> str:
 class CatalogEntry:
     tool: types.Tool
     source: str
-    upstream_name: str
 
 
 def build_catalog(
@@ -80,23 +79,17 @@ def build_catalog(
     )
     for source, tools, allowlist in groups:
         for tool in tools:
-            canonical_name = tool.name
-            if allowlist is not None and canonical_name not in allowlist:
+            name = tool.name
+            if allowlist is not None and name not in allowlist:
                 continue
-            if canonical_name in catalog:
-                raise ValueError(f"tool collision: {canonical_name}")
-            public_tool = (
-                tool
-                if tool.name == canonical_name
-                else tool.model_copy(update={"name": canonical_name})
-            )
+            if name in catalog:
+                raise ValueError(f"tool collision: {name}")
+            public_tool = tool
             if source == "hermes" and (
-                canonical_name == "vision_analyze" or canonical_name in BROWSER_TOOLS
+                name == "vision_analyze" or name in BROWSER_TOOLS
             ):
                 public_tool = public_tool.model_copy(update={"output_schema": None})
-            catalog[canonical_name] = CatalogEntry(
-                tool=public_tool, source=source, upstream_name=tool.name
-            )
+            catalog[name] = CatalogEntry(tool=public_tool, source=source)
     return catalog
 
 
@@ -285,26 +278,26 @@ class Gateway:
         try:
             preserve_images = False
             if entry.source == "context":
-                result = await self.context.call(entry.upstream_name, arguments)
+                result = await self.context.call(name, arguments)
             elif entry.source == "hermes":
-                if entry.upstream_name == "vision_analyze":
+                if name == "vision_analyze":
                     result = await self.hermes.call_vision(arguments)
                     preserve_images = True
-                elif entry.upstream_name in BROWSER_TOOLS:
+                elif name in BROWSER_TOOLS:
                     result = await self.hermes.call_browser(
-                        entry.upstream_name, arguments, task_id=task_id or "chatgpt:gateway"
+                        name, arguments, task_id=task_id or "chatgpt:gateway"
                     )
-                elif entry.upstream_name in DIRECT_HERMES_TOOLS:
+                elif name in DIRECT_HERMES_TOOLS:
                     result = await self.hermes.call_direct(
-                        entry.upstream_name, arguments, task_id=task_id or "chatgpt:gateway"
+                        name, arguments, task_id=task_id or "chatgpt:gateway"
                     )
                 else:
-                    result = await self.hermes.call(entry.upstream_name, arguments)
+                    result = await self.hermes.call(name, arguments)
             elif entry.source == "graph":
                 result = await self.graph.call(arguments)
             elif entry.source == "lsp":
                 payload = await asyncio.to_thread(
-                    self.lsp.call, entry.upstream_name, arguments
+                    self.lsp.call, name, arguments
                 )
                 result = types.CallToolResult(
                     content=[
@@ -315,9 +308,9 @@ class Gateway:
                     structured_content=payload,
                 )
             elif entry.source == "capability":
-                result = await self.capabilities.call(entry.upstream_name, arguments)
+                result = await self.capabilities.call(name, arguments)
             elif entry.source == "memory":
-                result = await self.memory.call(entry.upstream_name, arguments)
+                result = await self.memory.call(name, arguments)
             elif entry.source == "gateway":
                 if arguments:
                     return error_result(

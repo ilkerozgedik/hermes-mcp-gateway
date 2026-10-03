@@ -192,7 +192,7 @@ def _build_delegation_parent():
     from hermes_cli.fallback_config import get_fallback_chain
     from hermes_cli.runtime_provider import resolve_runtime_provider
     from run_agent import AIAgent
-    from tools.mcp_tool import discover_mcp_tools
+    from tools.mcp_tool_discovery import discover_mcp_tools
 
     cfg = load_config()
     model_cfg = cfg.get("model") or {}

@@ -205,7 +205,7 @@ class DelegationParentPolicyTests(unittest.TestCase):
         ), patch(
             "hermes_cli.runtime_provider.resolve_runtime_provider", return_value=runtime
         ), patch(
-            "tools.mcp_tool.discover_mcp_tools", return_value=["mcp__context_mode__ctx_execute"]
+            "tools.mcp_tool_discovery.discover_mcp_tools", return_value=["mcp__context_mode__ctx_execute"]
         ) as discover, patch(
             "hermes_cli.fallback_config.get_fallback_chain", return_value=[]
         ), patch("run_agent.AIAgent", return_value=parent) as agent_cls:
