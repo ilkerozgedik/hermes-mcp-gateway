@@ -34,11 +34,11 @@ Guarded Hermes capabilities are:
 - `delegate_task` — synchronous leaf delegation only, one or two children maximum, and `confirmed=true` after explicit user approval because it spends model inference. Children inherit only Hermes `web`, `vision`, `skills`, and the `mcp-context-mode` toolset. Context Mode MCP tools are reached through Hermes' scoped `tool_search`/`tool_describe`/`tool_call` bridge; native Hermes terminal/file/code tools and recursive delegation remain out of scope.
 - `cronjob` — read-only `list`, plus guarded `create`, `update`, `pause`, `resume`, `remove`, and `run`. Mutations require `confirmed=true`. Model/provider/base-URL overrides and script/no-agent/monitor execution fields are not exposed; delivery defaults to `local`.
 
-With the currently pinned Context Mode surface, the public MCP contract is 44 tools: 11 Context Mode + 23 curated Hermes tools (including 10 Camofox browser tools, native file/terminal/process_manage, image generation, and video analysis) + 1 Samchon Graph `inspect_code_graph` tool + 3 guarded Hermes capabilities + 5 memory + `startup_context`.
+With the currently pinned Context Mode surface, the public MCP contract is 50 tools: 11 Context Mode + 23 curated Hermes tools (including 10 Camofox browser tools, native file/terminal/process_manage, image generation, and video analysis) + 1 Samchon Graph `inspect_code_graph` tool + 6 read-only LSP tools + 3 guarded Hermes capabilities + 5 memory + `startup_context`.
 
 Gateway-owned startup tool:
 
-- `startup_context` — reads only the five fixed Hermes startup files (`.hermes.md`, `SOUL.md`, `MEMORY.md`, `USER.md`, and canonical Ponytail `SKILL.md`). It accepts no path and is not a generic filesystem surface.
+- `startup_context` — reads only the four fixed Hermes startup files (`.hermes.md`, `SOUL.md`, `MEMORY.md`, and `USER.md`). It accepts no path and is not a generic filesystem surface.
 
 Memory tools are:
 
@@ -84,7 +84,7 @@ Local integration gates before tunnel cutover:
 2. `vision_analyze`, `skills_list`, native file/terminal/`process_manage` tools, `image_generate`, `video_analyze`, and the exact 10 Camofox-compatible `browser_*` tools; explicit absence of `computer_use`, `browser_exec`, and `browser_cdp`.
 3. Guarded capability checks: real `session_search`, read-only `cronjob list`, and scoped delegation-tool policy; one small delegated child smoke when resource headroom permits.
 4. Honcho profile/context/search and controlled `memory_conclude` create/readback/delete.
-5. Gateway MCP initialize + exact 44-tool `tools/list` + representative calls, including a read-only Camofox browser navigation/snapshot smoke and cwd-scoped Samchon Graph smoke.
+5. Gateway MCP initialize + exact 50-tool `tools/list` + representative calls, including read-only LSP, Camofox browser navigation/snapshot, and cwd-scoped Samchon Graph smokes.
 6. `healthz` and `readyz` readback, including Samchon Graph readiness.
 7. systemd restart and enabled-state readback.
 8. Only after `readyz=200`: point Tunnel Client `main` from `3050/mcp` to `3060/mcp`; rollback is the inverse URL change plus Tunnel Client restart.
