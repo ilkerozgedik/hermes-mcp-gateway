@@ -9,38 +9,18 @@ from typing import Any
 from agent.redact import redact_sensitive_text
 from mcp import types
 def _load_honcho_components():
-    """Import Honcho schema and client components across Hermes versions.
+    """Load Honcho components through Hermes' plugin catalog API."""
+    from plugins.memory import import_provider_module
 
-    Current Hermes releases install Honcho from the plugin catalog and resolve
-    it host-side via `plugins.memory.import_provider_module`. Older releases
-    bundled it in-tree under `plugins.memory.honcho`.
-    """
-    try:
-        from plugins.memory import import_provider_module
-
-        schemas_mod = import_provider_module("honcho", "tool_schemas")
-        client_mod = import_provider_module("honcho", "client")
-        session_mod = import_provider_module("honcho", "session")
-        return (
-            schemas_mod.ALL_TOOL_SCHEMAS,
-            client_mod.HonchoClientConfig,
-            client_mod.get_honcho_client,
-            session_mod.HonchoSessionManager,
-        )
-    except (ImportError, AttributeError):
-        pass
-
-    # Fallback for legacy Hermes releases with bundled plugins.memory.honcho
-    try:
-        from plugins.memory.honcho import tool_schemas as schemas_mod
-        schemas = schemas_mod.ALL_TOOL_SCHEMAS
-    except (ImportError, AttributeError):
-        from plugins.memory.honcho import ALL_TOOL_SCHEMAS as schemas
-
-    from plugins.memory.honcho.client import HonchoClientConfig, get_honcho_client
-    from plugins.memory.honcho.session import HonchoSessionManager
-
-    return schemas, HonchoClientConfig, get_honcho_client, HonchoSessionManager
+    schemas_mod = import_provider_module("honcho", "tool_schemas")
+    client_mod = import_provider_module("honcho", "client")
+    session_mod = import_provider_module("honcho", "session")
+    return (
+        schemas_mod.ALL_TOOL_SCHEMAS,
+        client_mod.HonchoClientConfig,
+        client_mod.get_honcho_client,
+        session_mod.HonchoSessionManager,
+    )
 
 
 (
