@@ -4,7 +4,8 @@ from pathlib import Path
 
 class SystemdTemplateTests(unittest.TestCase):
     def test_service_is_bootstrap_relocatable_and_non_cascading(self):
-        unit = Path("systemd/hermes-mcp-gateway.service").read_text()
+        repo_root = Path(__file__).resolve().parent.parent
+        unit = (repo_root / "systemd/hermes-mcp-gateway.service").read_text()
         self.assertIn("User=user", unit)
         self.assertIn("Group=user", unit)
         self.assertIn("WorkingDirectory=/srv/agents/src/hermes-mcp-gateway", unit)
