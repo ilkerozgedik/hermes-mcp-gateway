@@ -59,6 +59,33 @@ class MemoryPolicyTests(unittest.TestCase):
         self.assertTrue(validate_memory_write({"list": True})[0])
         self.assertTrue(validate_memory_write({"delete_id": "abc123"})[0])
 
+    def test_honcho_components_loaded_and_exported(self):
+        from hermes_mcp_gateway.memory import (
+            ALL_TOOL_SCHEMAS,
+            HonchoClientConfig,
+            HonchoSessionManager,
+            get_honcho_client,
+        )
+
+        self.assertTrue(ALL_TOOL_SCHEMAS)
+        self.assertIsNotNone(HonchoClientConfig)
+        self.assertIsNotNone(HonchoSessionManager)
+        self.assertTrue(callable(get_honcho_client))
+        schemas = memory_tool_schemas()
+        self.assertEqual(len(schemas), 5)
+        for s in schemas:
+            self.assertTrue(s.name.startswith("memory_"))
+            self.assertIsNotNone(s.input_schema)
+
+    def test_gateway_server_import_smoke(self):
+        from hermes_mcp_gateway.server import Gateway, create_app
+
+        gateway = Gateway()
+        self.assertIsNotNone(gateway.memory)
+        app = create_app()
+        self.assertIsNotNone(app)
+
+
 
 if __name__ == "__main__":
     unittest.main()

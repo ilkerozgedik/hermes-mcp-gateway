@@ -1,8 +1,6 @@
 import unittest
 
-from plugins.memory.honcho.client import HonchoClientConfig
-
-from hermes_mcp_gateway.memory import resolve_memory_config
+from hermes_mcp_gateway.memory import HonchoClientConfig, resolve_memory_config
 
 
 class IdentityTests(unittest.TestCase):
