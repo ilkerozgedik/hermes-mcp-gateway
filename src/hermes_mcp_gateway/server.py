@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any
@@ -169,6 +170,8 @@ class Gateway:
         self.catalog: dict[str, CatalogEntry] = {}
         self.missing_final_tools: set[str] = set()
         self.web_tools_ready = False
+        self._web_probe_at = time.monotonic()
+        self._web_probe_lock = asyncio.Lock()
 
     @staticmethod
     def _payload_has_error(value: Any) -> bool:
@@ -222,6 +225,23 @@ class Gateway:
             self._tool_result_has_error(search) or self._tool_result_has_error(extract)
         )
 
+    async def refresh_web_tools(self) -> bool:
+        # Cache provider probes so /readyz does not issue a search on every call.
+        if time.monotonic() - self._web_probe_at < 60:
+            return self.web_tools_ready
+        async with self._web_probe_lock:
+            if time.monotonic() - self._web_probe_at < 60:
+                return self.web_tools_ready
+            try:
+                self.web_tools_ready = await asyncio.wait_for(
+                    self.probe_web_tools(), timeout=self.config.health_timeout_seconds
+                )
+            except Exception:  # noqa: BLE001 - readiness must fail closed
+                self.web_tools_ready = False
+            self.missing_final_tools = set() if self.web_tools_ready else set(WEB_TOOLS)
+            self._web_probe_at = time.monotonic()
+            return self.web_tools_ready
+
     async def start(self) -> None:
         try:
             await self.hermes.start()
@@ -248,6 +268,7 @@ class Gateway:
             )
             if not web_schema_missing and not self.web_tools_ready:
                 self.web_tools_ready = await self.probe_web_tools()
+            self._web_probe_at = time.monotonic()
             self.missing_final_tools = set() if self.web_tools_ready else set(WEB_TOOLS)
             await self.memory.start()
             self.catalog = build_catalog(
@@ -295,6 +316,10 @@ class Gateway:
                     )
                 else:
                     result = await self.hermes.call(name, arguments)
+                if name in WEB_TOOLS and self._tool_result_has_error(result):
+                    self.web_tools_ready = False
+                    self.missing_final_tools = set(WEB_TOOLS)
+                    self._web_probe_at = 0.0
             elif entry.source == "graph":
                 result = await self.graph.call(arguments)
             elif entry.source == "lsp":
@@ -333,6 +358,10 @@ class Gateway:
                 preserve_images=preserve_images,
             )
         except Exception as exc:  # noqa: BLE001 - upstream boundary must normalize failures
+            if name in WEB_TOOLS:
+                self.web_tools_ready = False
+                self.missing_final_tools = set(WEB_TOOLS)
+                self._web_probe_at = 0.0
             logger.warning(
                 "upstream tool call failed: source=%s tool=%s error=%s",
                 entry.source,
@@ -366,7 +395,7 @@ class Gateway:
                     missing.add("image_generate")
                 core_ok = not missing
                 web_schema_ok = not missing_expected(names, WEB_TOOLS)
-                return core_ok, bool(core_ok and web_schema_ok and self.web_tools_ready)
+                return core_ok, bool(core_ok and web_schema_ok and await self.refresh_web_tools())
             except Exception:  # noqa: BLE001 - health probe must degrade, not crash
                 return False, False
 

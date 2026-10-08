@@ -645,6 +645,36 @@ class OutputSanitizationTests(unittest.TestCase):
 
 
 class WebReadinessProbeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_cached_web_probe_recovers_after_expiry(self):
+        from hermes_mcp_gateway.server import Gateway
+
+        gateway = Gateway()
+        gateway.web_tools_ready = True
+        gateway._web_probe_at = 0.0
+        gateway.probe_web_tools = AsyncMock(side_effect=[False, True])
+        self.assertFalse(await gateway.refresh_web_tools())
+        self.assertFalse(await gateway.refresh_web_tools())
+        self.assertEqual(gateway.probe_web_tools.await_count, 1)
+
+        gateway._web_probe_at = 0.0
+        self.assertTrue(await gateway.refresh_web_tools())
+        self.assertEqual(gateway.probe_web_tools.await_count, 2)
+
+    async def test_web_tool_error_invalidates_cached_readiness(self):
+        from hermes_mcp_gateway.server import CatalogEntry, Gateway
+
+        gateway = Gateway()
+        gateway.web_tools_ready = True
+        gateway.hermes.call = AsyncMock(
+            return_value=types.CallToolResult(
+                content=[types.TextContent(text='{"error":"provider unavailable"}')]
+            )
+        )
+        gateway.catalog = {"web_search": CatalogEntry(tool("web_search"), "hermes")}
+        await gateway.call("web_search", {"query": "hello"})
+        self.assertFalse(gateway.web_tools_ready)
+        self.assertEqual(gateway._web_probe_at, 0.0)
+
     async def test_web_probe_rejects_error_payload_even_when_mcp_is_error_false(self):
         from unittest.mock import AsyncMock
 
