@@ -69,5 +69,5 @@ class ContextTransportTests(unittest.IsolatedAsyncioTestCase):
             result = await client._rpc("tools/list")
         self.assertEqual(result, {"tools": []})
         self.assertIs(to_thread.await_args.args[0].__self__, client)
-        self.assertEqual(to_thread.await_args.args[0].__name__, "_rpc_sync")
+        self.assertEqual(to_thread.await_args.args[0].__name__, "_rpc_with_retry")
         self.assertEqual(to_thread.await_args.args[1:], ("tools/list", None))

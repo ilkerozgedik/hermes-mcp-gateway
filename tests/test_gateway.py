@@ -15,8 +15,9 @@ from hermes_mcp_gateway.config import (
     WEB_TOOLS,
 )
 from hermes_mcp_gateway.lsp import LSP_TOOLS, lsp_tool_schemas
-from hermes_mcp_gateway.server import build_catalog, normalize_result
+from hermes_mcp_gateway.server import build_catalog, create_app, normalize_result
 from hermes_mcp_gateway.upstreams import (
+    ContextModeClient,
     SamchonGraphClient,
     _SamchonGraphSession,
     missing_expected,
@@ -189,6 +190,49 @@ class GatewayPolicyTests(unittest.TestCase):
             + 1,  # startup_context
             50,
         )
+
+
+class ReconnectionTests(unittest.TestCase):
+    def test_gateway_uses_stateless_http_sessions(self):
+        with patch("hermes_mcp_gateway.server.Server") as server:
+            create_app()
+        self.assertTrue(server.return_value.streamable_http_app.call_args.kwargs["stateless_http"])
+
+    def test_read_only_context_call_recovers_from_connection_reset(self):
+        client = ContextModeClient("http://127.0.0.1:3050/mcp")
+        params = {"name": "ctx_search", "arguments": {"queries": ["needle"]}}
+        with patch.object(client, "_rpc_sync", side_effect=[ConnectionResetError(), {"content": []}]) as rpc, patch("hermes_mcp_gateway.upstreams.time.sleep") as sleep:
+            self.assertEqual(client._rpc_with_retry("tools/call", params), {"content": []})
+        self.assertEqual(rpc.call_count, 2)
+        sleep.assert_called_once()
+
+    def test_read_only_context_call_stops_after_bounded_retries(self):
+        client = ContextModeClient("http://127.0.0.1:3050/mcp")
+        with patch.object(client, "_rpc_sync", side_effect=ConnectionResetError()) as rpc, patch("hermes_mcp_gateway.upstreams.time.sleep") as sleep, self.assertRaises(ConnectionResetError):
+            client._rpc_with_retry("tools/call", {"name": "ctx_doctor", "arguments": {}})
+        self.assertEqual(rpc.call_count, 5)
+        self.assertEqual(sleep.call_count, 4)
+
+    def test_write_tools_never_retry_after_connection_loss(self):
+        client = ContextModeClient("http://127.0.0.1:3050/mcp")
+        for tool in ("ctx_execute", "ctx_index", "ctx_purge", "ctx_fetch_and_index", "ctx_job_start"):
+            with self.subTest(tool=tool), patch.object(client, "_rpc_sync", side_effect=ConnectionResetError()) as rpc:
+                with self.assertRaises(ConnectionResetError):
+                    client._rpc_with_retry("tools/call", {"name": tool, "arguments": {}})
+                rpc.assert_called_once()
+
+    def test_application_errors_are_not_retried(self):
+        client = ContextModeClient("http://127.0.0.1:3050/mcp")
+        with patch.object(client, "_rpc_sync", side_effect=RuntimeError("Context Mode HTTP 503")) as rpc:
+            with self.assertRaisesRegex(RuntimeError, "503"):
+                client._rpc_with_retry("tools/call", {"name": "ctx_search", "arguments": {}})
+            rpc.assert_called_once()
+
+    def test_tool_discovery_recovers_after_connection_refused(self):
+        client = ContextModeClient("http://127.0.0.1:3050/mcp")
+        with patch.object(client, "_rpc_sync", side_effect=[ConnectionRefusedError(), {"tools": []}]) as rpc, patch("hermes_mcp_gateway.upstreams.time.sleep"):
+            self.assertEqual(client._rpc_with_retry("tools/list"), {"tools": []})
+            self.assertEqual(rpc.call_count, 2)
 
 
 if __name__ == "__main__":

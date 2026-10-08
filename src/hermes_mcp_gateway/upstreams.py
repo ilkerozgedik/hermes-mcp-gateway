@@ -5,6 +5,7 @@ import base64
 import http.client
 import json
 import os
+import time
 from collections import OrderedDict
 from contextlib import AsyncExitStack
 from pathlib import Path
@@ -22,6 +23,8 @@ from .config import (
 )
 
 _PROTOCOL = "2026-07-28"
+# Replaying a write or command after a broken connection can duplicate effects.
+_RETRYABLE_CONTEXT_TOOLS = frozenset({"ctx_search", "ctx_doctor"})
 
 
 def missing_expected(actual: set[str], expected: set[str] | frozenset[str]) -> set[str]:
@@ -186,10 +189,27 @@ class ContextModeClient:
             raise TypeError("Context Mode returned an invalid MCP result")
         return result
 
+    def _rpc_with_retry(
+        self, method: str, params: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        retryable = method == "tools/list" or (
+            method == "tools/call"
+            and params is not None
+            and params.get("name") in _RETRYABLE_CONTEXT_TOOLS
+        )
+        for attempt in range(5 if retryable else 1):
+            try:
+                return self._rpc_sync(method, params)
+            except (ConnectionError, http.client.IncompleteRead):
+                if not retryable or attempt == 4:
+                    raise
+                time.sleep(0.4 * (2 ** attempt))
+        raise AssertionError("unreachable")
+
     async def _rpc(
         self, method: str, params: dict[str, Any] | None = None
     ) -> dict[str, Any]:
-        return await asyncio.to_thread(self._rpc_sync, method, params)
+        return await asyncio.to_thread(self._rpc_with_retry, method, params)
 
     async def discover(self) -> list[types.Tool]:
         result = await self._rpc("tools/list")

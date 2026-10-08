@@ -479,7 +479,7 @@ def create_app(config: GatewayConfig | None = None):
     return server.streamable_http_app(
         streamable_http_path="/mcp",
         json_response=True,
-        stateless_http=False,
+        stateless_http=True,
         host=gateway.config.host,
         custom_starlette_routes=[Route("/healthz", healthz), Route("/readyz", readyz)],
     )
