@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 
 CONTEXT_REQUIRED = frozenset(
@@ -100,3 +101,5 @@ class GatewayConfig:
     max_startup_bytes: int = 64 * 1024
     memory_ai_peer: str = "chatgpt"
     memory_session: str = "chatgpt"
+    coordinator_enabled: bool = os.getenv("AGENT_COORDINATOR_ENABLED", "0") == "1"
+    coordinator_url: str = "http://127.0.0.1:3061/mcp"

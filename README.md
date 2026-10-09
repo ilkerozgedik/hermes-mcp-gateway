@@ -92,3 +92,19 @@ Local integration gates before tunnel cutover:
 ## systemd
 
 The repository ships `systemd/hermes-mcp-gateway.service`. It uses `Wants`/`After` rather than hard `Requires`, binds the application itself to loopback, imports the same Hermes runtime environment files, and keeps upstream failures from cascading through systemd dependency teardown.
+
+## Multi-agent coordinator (opt-in)
+
+A separate loopback-only MCP server on `127.0.0.1:3061/mcp` owns GitHub Issues and isolated Git worktrees. It shares **no in-process session state** with Hermes or ChatGPT; SQLite transactions control exclusive ownership. The Gateway proxies its six tools only with `AGENT_COORDINATOR_ENABLED=1` (56 tools total). Hermes connects directly through the `multi-agent-coordinator` MCP server entry in `~/.hermes/config.yaml`; never point Hermes back to the aggregator on `:3060`.
+
+Tools: `tasks_list(repo)`, `task_claim(repo, issue, agent)`, `task_status(repo, issue)`, `task_heartbeat(repo, issue, claim_id)`, `task_finish(repo, issue, claim_id, pr_number)`, and `task_release(repo, issue, claim_id)`. The opaque `claim_id` grants ownership for a single Issue; it must remain private and must not be committed, copied into GitHub comments, or logged. A claim creates `agent/issue-N` from `origin/main` in `/home/hermes/worktrees/<repo>/issue-N`. GitHub Issues need an `agent:ready` label; state is projected to `agent:active`, `agent:review`, or `agent:blocked`. GitHub label synchronization failures are reported, not retried as task claims.
+
+Agents should list available Issues, claim one, work only in their returned worktree, maintain the lease via heartbeat, commit/push their feature branch, create a PR against `main`, and call `task_finish`. The Coordinator does **not** merge PRs, deploy, delete worktrees, or automatically reassign expired leases. Expired active claims become blocked for manual recovery; completed PR reviews stay owned. Only the existing CI-gated GitOps promotion deploys production. SQLite stores hashed ownership capabilities and lives under `/srv/agents/runtime/multi-agent`; never put it in Git.
+
+The `systemd/multi-agent-coordinator.service` unit and the Hermes bootstrap install/start it before the Gateway. GitHub CLI authorization and the existing pinned checkout remain prerequisites. For a local integration test:
+
+```bash
+PYTHONPATH=src:/srv/agents/src/hermes-agent /home/hermes/.hermes/venvs/hermes/bin/python -m unittest discover -s tests -p 'test_coordinator*.py' -v
+```
+
+**Boundary:** Worktrees isolate Git state, not unrestricted shell/filesystem access. Fully unattended untrusted code execution requires separate worker OS sandboxes before enabling autonomous merges or broad write tools. Interactive ChatGPT conversations cannot be launched by the coordinator automatically.
