@@ -1,6 +1,6 @@
 # Hermes MCP Gateway
 
-Single localhost-only MCP endpoint that aggregates Context Mode, a strict allowlist from Hermes native tools, one cwd-scoped Samchon Graph code-intelligence tool, three guarded Hermes capabilities, and Hermes/Honcho memory without patching any upstream source.
+Single localhost-only MCP endpoint that aggregates Context Mode, a strict Hermes tool allowlist, Samchon Graph, guarded capabilities and Honcho memory through progressive tool disclosure without patching upstream source.
 
 ## Endpoint
 
@@ -12,7 +12,7 @@ Single localhost-only MCP endpoint that aggregates Context Mode, a strict allowl
 
 ## Tool policy
 
-Context Mode forwards discovered `ctx_*` tools and remains the primary compact execution/indexing backend. The gateway also exposes a deliberately small native Hermes file/terminal surface for direct host work.
+The complete 56-tool allowlisted catalog remains available, but `tools/list` exposes only six tools: `tool_search`, `tool_describe`, `tool_call`, `startup_context`, `memory_context`, and `skills_list`. The other 53 tools are accessible only through the discovery bridge. Search uses Hermes' native BM25 implementation over the frozen Gateway catalog (no separate search service/index); `tool_describe` returns authoritative MCP input schemas. `tool_call` executes **one** described tool via the existing Gateway dispatcher. Direct MCP calls to hidden tools fail closed. Gateway safety policies and backend ownership do not change.
 
 Hermes is default-deny and may expose only:
 
@@ -34,7 +34,7 @@ Guarded Hermes capabilities are:
 - `delegate_task` — synchronous leaf delegation only, one or two children maximum, and `confirmed=true` after explicit user approval because it spends model inference. Children inherit only Hermes `web`, `vision`, `skills`, and the `mcp-context-mode` toolset. Context Mode MCP tools are reached through Hermes' scoped `tool_search`/`tool_describe`/`tool_call` bridge; native Hermes terminal/file/code tools and recursive delegation remain out of scope.
 - `cronjob` — read-only `list`, plus guarded `create`, `update`, `pause`, `resume`, `remove`, and `run`. Mutations require `confirmed=true`. Model/provider/base-URL overrides and script/no-agent/monitor execution fields are not exposed; delivery defaults to `local`.
 
-With the currently pinned Context Mode surface, the public MCP contract is 50 tools: 11 Context Mode + 23 curated Hermes tools (including 10 Camofox browser tools, native file/terminal/process_manage, image generation, and video analysis) + 1 Samchon Graph `inspect_code_graph` tool + 6 read-only LSP tools + 3 guarded Hermes capabilities + 5 memory + `startup_context`.
+The underlying catalog is 50 tools without the opt-in Coordinator, or 56 with its six tools enabled. Both configurations expose the same six public tools. No tools are dynamically added to the catalog during a session; a Gateway restart refreshes discovery. A new ChatGPT MCP connection may be required to refresh the public schemas.
 
 Gateway-owned startup tool:
 
@@ -84,7 +84,7 @@ Local integration gates before tunnel cutover:
 2. `vision_analyze`, `skills_list`, native file/terminal/`process_manage` tools, `image_generate`, `video_analyze`, and the exact 10 Camofox-compatible `browser_*` tools; explicit absence of `computer_use`, `browser_exec`, and `browser_cdp`.
 3. Guarded capability checks: real `session_search`, read-only `cronjob list`, and scoped delegation-tool policy; one small delegated child smoke when resource headroom permits.
 4. Honcho profile/context/search and controlled `memory_conclude` create/readback/delete.
-5. Gateway MCP initialize + exact 50-tool `tools/list` + representative calls, including read-only LSP, Camofox browser navigation/snapshot, and cwd-scoped Samchon Graph smokes.
+5. Gateway MCP initialize + exact six-tool `tools/list`, lexical search + describe, denied direct hidden calls, and representative `tool_call` calls covering LSP, Camofox browser navigation/snapshot, and cwd-scoped Samchon Graph.
 6. `healthz` and `readyz` readback, including Samchon Graph readiness.
 7. systemd restart and enabled-state readback.
 8. Only after `readyz=200`: point Tunnel Client `main` from `3050/mcp` to `3060/mcp`; rollback is the inverse URL change plus Tunnel Client restart.
@@ -95,7 +95,7 @@ The repository ships `systemd/hermes-mcp-gateway.service`. It uses `Wants`/`Afte
 
 ## Multi-agent coordinator (opt-in)
 
-A separate loopback-only MCP server on `127.0.0.1:3061/mcp` owns GitHub Issues and isolated Git worktrees. It shares **no in-process session state** with Hermes or ChatGPT; SQLite transactions control exclusive ownership. The Gateway proxies its six tools only with `AGENT_COORDINATOR_ENABLED=1` (56 tools total). Hermes connects directly through the `multi-agent-coordinator` MCP server entry in `~/.hermes/config.yaml`; never point Hermes back to the aggregator on `:3060`.
+A separate loopback-only MCP server on `127.0.0.1:3061/mcp` owns GitHub Issues and isolated Git worktrees. It shares **no in-process session state** with Hermes or ChatGPT; SQLite transactions control exclusive ownership. The Gateway adds its six tools to the hidden catalog only with `AGENT_COORDINATOR_ENABLED=1` (56 underlying tools). Hermes connects directly through the `multi-agent-coordinator` MCP server entry in `~/.hermes/config.yaml`; never point Hermes back to the aggregator on `:3060`.
 
 Tools: `tasks_list(repo)`, `task_claim(repo, issue, agent)`, `task_status(repo, issue)`, `task_heartbeat(repo, issue, claim_id)`, `task_finish(repo, issue, claim_id, pr_number)`, and `task_release(repo, issue, claim_id)`. The opaque `claim_id` grants ownership for a single Issue; it must remain private and must not be committed, copied into GitHub comments, or logged. A claim creates `agent/issue-N` from `origin/main` in `/home/hermes/worktrees/<repo>/issue-N`. GitHub Issues need an `agent:ready` label; state is projected to `agent:active`, `agent:review`, or `agent:blocked`. GitHub label synchronization failures are reported, not retried as task claims.
 

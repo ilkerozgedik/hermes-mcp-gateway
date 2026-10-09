@@ -33,6 +33,7 @@ from .coordinator.client import CoordinatorClient
 from .lsp import LSPAdapter, lsp_tool_schemas
 from .memory import MemoryAdapter, memory_tool_schemas
 from .startup import StartupContext, startup_tool_schema
+from .tool_discovery import BRIDGE_NAMES, PUBLIC_NAMES, ToolDiscovery, public_schemas
 from .upstreams import (
     ContextModeClient,
     HermesToolsClient,
@@ -171,10 +172,12 @@ class Gateway:
         self.capabilities = HermesCapabilities()
         self.coordinator = (
             CoordinatorClient(self.config.coordinator_url, self.config.timeout_seconds)
-            if self.config.coordinator_enabled else None
+            if self.config.coordinator_enabled
+            else None
         )
         self.startup = StartupContext(max_total_bytes=self.config.max_startup_bytes)
         self.catalog: dict[str, CatalogEntry] = {}
+        self.discovery: ToolDiscovery | None = None
         self.missing_final_tools: set[str] = set()
         self.web_tools_ready = False
         self._web_probe_at = time.monotonic()
@@ -286,8 +289,11 @@ class Gateway:
                 capability_tools=capability_tool_schemas(),
                 graph_tools=[graph_tool],
                 lsp_tools=lsp_tool_schemas(),
-                coordinator_tools=(await self.coordinator.discover()) if self.coordinator else [],
+                coordinator_tools=(await self.coordinator.discover())
+                if self.coordinator
+                else [],
             )
+            self.discovery = ToolDiscovery(self.catalog)
         except Exception:
             await self.close()
             raise
@@ -301,8 +307,40 @@ class Gateway:
         await asyncio.to_thread(self.lsp.close)
 
     async def call(
-        self, name: str, arguments: dict[str, Any], *, task_id: str | None = None
+        self,
+        name: str,
+        arguments: dict[str, Any],
+        *,
+        task_id: str | None = None,
+        via_bridge: bool = False,
     ) -> types.CallToolResult:
+        if name in BRIDGE_NAMES:
+            if via_bridge or self.discovery is None:
+                return error_result(
+                    "Tool discovery unavailable", limit=self.config.max_text_chars
+                )
+            try:
+                if name == "tool_search":
+                    payload = self.discovery.search(arguments)
+                elif name == "tool_describe":
+                    payload = self.discovery.describe(arguments)
+                else:
+                    target, params = self.discovery.validate_call(arguments)
+                    return await self.call(
+                        target, params, task_id=task_id, via_bridge=True
+                    )
+                return normalize_result(
+                    types.CallToolResult(
+                        content=[
+                            types.TextContent(
+                                text=json.dumps(payload, ensure_ascii=False)
+                            )
+                        ]
+                    ),
+                    limit=self.config.max_text_chars,
+                )
+            except ValueError as exc:
+                return error_result(str(exc), limit=self.config.max_text_chars)
         entry = self.catalog.get(name)
         if entry is None:
             return error_result(
@@ -333,9 +371,7 @@ class Gateway:
             elif entry.source == "graph":
                 result = await self.graph.call(arguments)
             elif entry.source == "lsp":
-                payload = await asyncio.to_thread(
-                    self.lsp.call, name, arguments
-                )
+                payload = await asyncio.to_thread(self.lsp.call, name, arguments)
                 result = types.CallToolResult(
                     content=[
                         types.TextContent(
@@ -407,7 +443,9 @@ class Gateway:
                     missing.add("image_generate")
                 core_ok = not missing
                 web_schema_ok = not missing_expected(names, WEB_TOOLS)
-                return core_ok, bool(core_ok and web_schema_ok and await self.refresh_web_tools())
+                return core_ok, bool(
+                    core_ok and web_schema_ok and await self.refresh_web_tools()
+                )
             except Exception:  # noqa: BLE001 - health probe must degrade, not crash
                 return False, False
 
@@ -458,16 +496,15 @@ def create_app(config: GatewayConfig | None = None):
             await gateway.close()
 
     async def list_tools(_ctx, _params):
-        return types.ListToolsResult(
-            tools=[entry.tool for entry in gateway.catalog.values()]
-        )
+        return types.ListToolsResult(tools=public_schemas(gateway.catalog))
 
     async def call_tool(_ctx, params):
-        task_id = (
-            browser_task_id(_ctx)
-            if params.name in BROWSER_TOOLS or params.name in DIRECT_HERMES_TOOLS
-            else None
-        )
+        if params.name not in PUBLIC_NAMES:
+            return error_result(
+                f"Unknown or disallowed tool: {params.name}",
+                limit=gateway.config.max_text_chars,
+            )
+        task_id = browser_task_id(_ctx) if params.name == "tool_call" else None
         return await gateway.call(params.name, params.arguments or {}, task_id=task_id)
 
     server = Server(
