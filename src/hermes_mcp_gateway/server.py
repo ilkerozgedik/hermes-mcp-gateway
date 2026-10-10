@@ -40,6 +40,7 @@ from .upstreams import (
     SamchonGraphClient,
     missing_expected,
 )
+from .workspace import Workspaces, workspace_tool_schemas
 
 logger = logging.getLogger("hermes_mcp_gateway")
 
@@ -170,6 +171,9 @@ class Gateway:
             timeout=self.config.timeout_seconds,
         )
         self.capabilities = HermesCapabilities()
+        self.workspaces = Workspaces(
+            self.config.workspace_repos_root, self.config.workspace_worktrees_root
+        )
         self.coordinator = (
             CoordinatorClient(self.config.coordinator_url, self.config.timeout_seconds)
             if self.config.coordinator_enabled
@@ -285,7 +289,7 @@ class Gateway:
                 context_tools,
                 hermes_tools,
                 memory_tool_schemas(),
-                [startup_tool_schema()],
+                [startup_tool_schema(), *workspace_tool_schemas()],
                 capability_tools=capability_tool_schemas(),
                 graph_tools=[graph_tool],
                 lsp_tools=lsp_tool_schemas(),
@@ -387,12 +391,23 @@ class Gateway:
             elif entry.source == "coordinator" and self.coordinator:
                 result = await self.coordinator.call(name, arguments)
             elif entry.source == "gateway":
-                if arguments:
-                    return error_result(
-                        "startup_context does not accept arguments",
-                        limit=self.config.max_text_chars,
+                if name == "startup_context":
+                    if arguments:
+                        return error_result(
+                            "startup_context does not accept arguments",
+                            limit=self.config.max_text_chars,
+                        )
+                    payload = await asyncio.to_thread(self.startup.read)
+                elif name == "workspace_open":
+                    payload = await asyncio.to_thread(
+                        self.workspaces.open, arguments["repo"]
                     )
-                payload = await asyncio.to_thread(self.startup.read)
+                elif name == "workspace_close":
+                    payload = await asyncio.to_thread(
+                        self.workspaces.close, arguments["path"]
+                    )
+                else:
+                    raise ValueError(f"unsupported gateway tool: {name}")
                 result = types.CallToolResult(
                     content=[
                         types.TextContent(text=json.dumps(payload, ensure_ascii=False))

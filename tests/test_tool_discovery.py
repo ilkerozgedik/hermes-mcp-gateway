@@ -7,6 +7,7 @@ from mcp import types
 
 from hermes_mcp_gateway.server import Gateway, build_catalog, create_app
 from hermes_mcp_gateway.tool_discovery import ToolDiscovery, public_schemas
+from hermes_mcp_gateway.workspace import workspace_tool_schemas
 
 
 def tool(name):
@@ -141,3 +142,40 @@ class BridgeDispatchTests(unittest.IsolatedAsyncioTestCase):
         search = await self.gateway.call("tool_search", {"queries": ["browser click"]})
         assert isinstance(search.content[0], types.TextContent)
         self.assertIn("browser_click", json.loads(search.content[0].text)["tools"])
+
+    async def test_workspace_tools_discoverable_and_dispatched(self):
+        self.gateway.catalog = build_catalog(
+            [tool("ctx_execute")],
+            [tool("skills_list")],
+            [tool("memory_context")],
+            [tool("startup_context"), *workspace_tool_schemas()],
+        )
+        self.gateway.discovery = ToolDiscovery(self.gateway.catalog)
+        names = self.gateway.discovery.search({"queries": ["workspace_open"]})[
+            "results"
+        ][0]["matches"]
+        self.assertIn("workspace_open", names)
+        with patch.object(
+            self.gateway.workspaces, "open", return_value={"status": "not_git"}
+        ) as opened:
+            result = await self.gateway.call(
+                "tool_call",
+                {"calls": [{"name": "workspace_open", "arguments": {"repo": "plain"}}]},
+            )
+            self.assertFalse(result.is_error)
+            assert isinstance(result.content[0], types.TextContent)
+            self.assertEqual(json.loads(result.content[0].text)["status"], "not_git")
+            opened.assert_called_once_with("plain")
+        with patch.object(
+            self.gateway.workspaces, "close", return_value={"status": "closed"}
+        ) as closed:
+            result = await self.gateway.call(
+                "tool_call",
+                {
+                    "calls": [
+                        {"name": "workspace_close", "arguments": {"path": "/safe/path"}}
+                    ]
+                },
+            )
+            self.assertFalse(result.is_error)
+            closed.assert_called_once_with("/safe/path")

@@ -78,6 +78,12 @@ MEMORY_TOOLS = frozenset(
 
 @dataclass(frozen=True, slots=True)
 class GatewayConfig:
+    workspace_repos_root: str = os.getenv(
+        "AGENT_WORKSPACES_REPOS_ROOT", "/home/hermes/work"
+    )
+    workspace_worktrees_root: str = os.getenv(
+        "AGENT_WORKSPACES_WORKTREES_ROOT", "/home/hermes/worktrees"
+    )
     host: str = "127.0.0.1"
     port: int = 3060
     context_url: str = "http://127.0.0.1:3050/mcp"

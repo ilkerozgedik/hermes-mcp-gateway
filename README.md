@@ -93,6 +93,20 @@ Local integration gates before tunnel cutover:
 
 The repository ships `systemd/hermes-mcp-gateway.service`. It uses `Wants`/`After` rather than hard `Requires`, binds the application itself to loopback, imports the same Hermes runtime environment files, and keeps upstream failures from cascading through systemd dependency teardown.
 
+## Native Git workspaces (new; coordinator still available during pilot)
+
+The Gateway exposes two discoverable tools: `workspace_open(repo)` and
+`workspace_close(path)`. Repositories are direct Git checkouts beneath
+`/home/hermes/work`; each open creates a unique `agent/<id>` branch and a
+worktree beneath `/home/hermes/worktrees/<repo>/<id>`. Non-Git directories
+return `not_git`; read-only analysis needs no worktree. Use the returned
+worktree as the working directory for all edits, tests, and commits.
+
+Close refuses dirty/ignored files and commits absent from other local or
+remote-tracking refs, never forces removal, and leaves branches intact.
+Git worktrees are *not* operating-system sandboxes. Two distinct ChatGPT
+sessions must still be piloted before retiring the existing Coordinator.
+
 ## Multi-agent coordinator (opt-in)
 
 A separate loopback-only MCP server on `127.0.0.1:3061/mcp` owns GitHub Issues and isolated Git worktrees. It shares **no in-process session state** with Hermes or ChatGPT; SQLite transactions control exclusive ownership. The Gateway adds its six tools to the hidden catalog only with `AGENT_COORDINATOR_ENABLED=1` (56 underlying tools). Hermes connects directly through the `multi-agent-coordinator` MCP server entry in `~/.hermes/config.yaml`; never point Hermes back to the aggregator on `:3060`.
