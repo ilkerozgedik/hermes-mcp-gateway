@@ -26,20 +26,3 @@ class SystemdTemplateTests(unittest.TestCase):
         self.assertNotIn("Requires=", unit)
         self.assertIn("Restart=on-failure", unit)
         self.assertIn("NoNewPrivileges=true", unit)
-
-    def test_coordinator_service_is_loopback_and_bootstrap_relocatable(self):
-        repo_root = Path(__file__).resolve().parent.parent
-        unit = (repo_root / "systemd/multi-agent-coordinator.service").read_text()
-        self.assertIn("User=user", unit)
-        self.assertIn("Group=user", unit)
-        self.assertIn("/home/user/worktrees", unit)
-        self.assertIn("/srv/agents/runtime/multi-agent/coordinator.sqlite", unit)
-        self.assertIn("AGENT_COORDINATOR_REPOS=peacify", unit)
-        self.assertIn("hermes_mcp_gateway.coordinator.server", unit)
-        self.assertIn("ProtectSystem=full", unit)
-        self.assertIn("UMask=0077", unit)
-        self.assertNotIn("Requires=", unit)
-
-
-if __name__ == "__main__":
-    unittest.main()

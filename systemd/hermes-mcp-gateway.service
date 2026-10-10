@@ -1,7 +1,7 @@
 [Unit]
 Description=Hermes MCP Gateway
-Wants=network-online.target context-mode.service agent-runtime.service multi-agent-coordinator.service
-After=network-online.target context-mode.service agent-runtime.service multi-agent-coordinator.service
+Wants=network-online.target context-mode.service agent-runtime.service
+After=network-online.target context-mode.service agent-runtime.service
 
 [Service]
 Type=simple
@@ -12,7 +12,7 @@ Environment=HOME=/home/user
 Environment=HERMES_HOME=/home/user/.hermes
 Environment=HERMES_QUIET=1
 Environment=HERMES_REDACT_SECRETS=true
-Environment=AGENT_COORDINATOR_ENABLED=1
+
 Environment=HERMES_DISABLE_LAZY_INSTALLS=1
 Environment=PYTHONPATH=/srv/agents/src/hermes-mcp-gateway/src:/srv/agents/src/hermes-agent
 Environment=PATH=/home/user/.local/bin:/home/user/.local/npm/bin:/home/user/.cargo/bin:/home/user/.nix-profile/bin:/opt/node/bin:/opt/flutter/bin:/opt/dotnet:/opt/android-sdk/cmdline-tools/latest/bin:/opt/android-sdk/platform-tools:/usr/local/bin:/usr/bin:/bin

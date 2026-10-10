@@ -177,7 +177,7 @@ class GatewayPolicyTests(unittest.TestCase):
         self.assertIsNone(catalog["browser_navigate"].tool.output_schema)
         self.assertIsNotNone(browser.output_schema)
 
-    def test_public_surface_count_is_50_with_lsp_and_samchon_graph(self):
+    def test_public_surface_count_is_47_with_lsp_and_samchon_graph(self):
         from hermes_mcp_gateway.config import CONTEXT_REQUIRED
 
         self.assertEqual(
@@ -188,7 +188,7 @@ class GatewayPolicyTests(unittest.TestCase):
             + 1  # Samchon Graph
             + len(LSP_TOOLS)
             + 1,  # startup_context
-            50,
+            47,
         )
 
 
@@ -215,7 +215,7 @@ class ReconnectionTests(unittest.TestCase):
 
     def test_write_tools_never_retry_after_connection_loss(self):
         client = ContextModeClient("http://127.0.0.1:3050/mcp")
-        for tool in ("ctx_execute", "ctx_index", "ctx_purge", "ctx_fetch_and_index", "ctx_job_start"):
+        for tool in ("ctx_execute", "ctx_index", "ctx_purge", "ctx_fetch_and_index"):
             with self.subTest(tool=tool), patch.object(client, "_rpc_sync", side_effect=ConnectionResetError()) as rpc:
                 with self.assertRaises(ConnectionResetError):
                     client._rpc_with_retry("tools/call", {"name": tool, "arguments": {}})

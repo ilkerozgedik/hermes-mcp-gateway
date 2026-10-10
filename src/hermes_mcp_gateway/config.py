@@ -1,14 +1,10 @@
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 
 CONTEXT_REQUIRED = frozenset(
     {
         "ctx_execute",
-        "ctx_job_start",
-        "ctx_job_status",
-        "ctx_job_cancel",
         "ctx_execute_file",
         "ctx_index",
         "ctx_search",
@@ -78,12 +74,6 @@ MEMORY_TOOLS = frozenset(
 
 @dataclass(frozen=True, slots=True)
 class GatewayConfig:
-    workspace_repos_root: str = os.getenv(
-        "AGENT_WORKSPACES_REPOS_ROOT", "/home/hermes/work"
-    )
-    workspace_worktrees_root: str = os.getenv(
-        "AGENT_WORKSPACES_WORKTREES_ROOT", "/home/hermes/worktrees"
-    )
     host: str = "127.0.0.1"
     port: int = 3060
     context_url: str = "http://127.0.0.1:3050/mcp"
@@ -107,5 +97,3 @@ class GatewayConfig:
     max_startup_bytes: int = 64 * 1024
     memory_ai_peer: str = "chatgpt"
     memory_session: str = "chatgpt"
-    coordinator_enabled: bool = os.getenv("AGENT_COORDINATOR_ENABLED", "0") == "1"
-    coordinator_url: str = "http://127.0.0.1:3061/mcp"

@@ -29,7 +29,6 @@ from .config import (
     WEB_TOOLS,
     GatewayConfig,
 )
-from .coordinator.client import CoordinatorClient
 from .lsp import LSPAdapter, lsp_tool_schemas
 from .memory import MemoryAdapter, memory_tool_schemas
 from .startup import StartupContext, startup_tool_schema
@@ -40,7 +39,6 @@ from .upstreams import (
     SamchonGraphClient,
     missing_expected,
 )
-from .workspace import Workspaces, workspace_tool_schemas
 
 logger = logging.getLogger("hermes_mcp_gateway")
 
@@ -70,7 +68,6 @@ def build_catalog(
     capability_tools: list[types.Tool] | None = None,
     graph_tools: list[types.Tool] | None = None,
     lsp_tools: list[types.Tool] | None = None,
-    coordinator_tools: list[types.Tool] | None = None,
 ) -> dict[str, CatalogEntry]:
     catalog: dict[str, CatalogEntry] = {}
     groups = (
@@ -81,7 +78,6 @@ def build_catalog(
         ("capability", capability_tools or [], None),
         ("memory", memory_tools, None),
         ("gateway", gateway_tools or [], None),
-        ("coordinator", coordinator_tools or [], None),
     )
     for source, tools, allowlist in groups:
         for tool in tools:
@@ -171,14 +167,6 @@ class Gateway:
             timeout=self.config.timeout_seconds,
         )
         self.capabilities = HermesCapabilities()
-        self.workspaces = Workspaces(
-            self.config.workspace_repos_root, self.config.workspace_worktrees_root
-        )
-        self.coordinator = (
-            CoordinatorClient(self.config.coordinator_url, self.config.timeout_seconds)
-            if self.config.coordinator_enabled
-            else None
-        )
         self.startup = StartupContext(max_total_bytes=self.config.max_startup_bytes)
         self.catalog: dict[str, CatalogEntry] = {}
         self.discovery: ToolDiscovery | None = None
@@ -289,13 +277,10 @@ class Gateway:
                 context_tools,
                 hermes_tools,
                 memory_tool_schemas(),
-                [startup_tool_schema(), *workspace_tool_schemas()],
+                [startup_tool_schema()],
                 capability_tools=capability_tool_schemas(),
                 graph_tools=[graph_tool],
                 lsp_tools=lsp_tool_schemas(),
-                coordinator_tools=(await self.coordinator.discover())
-                if self.coordinator
-                else [],
             )
             self.discovery = ToolDiscovery(self.catalog)
         except Exception:
@@ -303,8 +288,6 @@ class Gateway:
             raise
 
     async def close(self) -> None:
-        if self.coordinator:
-            await self.coordinator.close()
         await self.context.close()
         await self.hermes.close()
         await self.graph.close()
@@ -388,8 +371,6 @@ class Gateway:
                 result = await self.capabilities.call(name, arguments)
             elif entry.source == "memory":
                 result = await self.memory.call(name, arguments)
-            elif entry.source == "coordinator" and self.coordinator:
-                result = await self.coordinator.call(name, arguments)
             elif entry.source == "gateway":
                 if name == "startup_context":
                     if arguments:
@@ -398,14 +379,6 @@ class Gateway:
                             limit=self.config.max_text_chars,
                         )
                     payload = await asyncio.to_thread(self.startup.read)
-                elif name == "workspace_open":
-                    payload = await asyncio.to_thread(
-                        self.workspaces.open, arguments["repo"]
-                    )
-                elif name == "workspace_close":
-                    payload = await asyncio.to_thread(
-                        self.workspaces.close, arguments["path"]
-                    )
                 else:
                     raise ValueError(f"unsupported gateway tool: {name}")
                 result = types.CallToolResult(
@@ -489,9 +462,6 @@ class Gateway:
             "honcho": honcho_ok,
             "startup_context": self.startup.check(),
         }
-        if self.coordinator:
-            health_url = self.config.coordinator_url.rsplit("/", 1)[0] + "/healthz"
-            components["multi_agent_coordinator"] = await get_ok(health_url)
         return {
             "status": "ok" if all(components.values()) else "degraded",
             "components": components,
