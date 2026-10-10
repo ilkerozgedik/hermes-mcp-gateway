@@ -53,6 +53,33 @@ def browser_task_id(ctx: Any) -> str:
     return f"chatgpt:{session_id}" if session_id else "chatgpt:gateway"
 
 
+def deferred_image_tool() -> types.Tool:
+    # Hermes omits this MCP tool while the selected provider is rate-limited.
+    # Capabilities come from Hermes itself; provider availability is checked at call time.
+    from tools.image_generation_tool import _build_dynamic_image_schema
+
+    schema = _build_dynamic_image_schema()
+    return types.Tool(
+        name="image_generate",
+        description=schema["description"],
+        input_schema=schema["parameters"],
+    )
+
+
+def call_deferred_image(arguments: dict[str, Any]) -> types.CallToolResult:
+    from model_tools import handle_function_call
+
+    raw = handle_function_call("image_generate", arguments)
+    try:
+        payload = json.loads(raw)
+    except (TypeError, ValueError):
+        payload = None
+    failed = isinstance(payload, dict) and (
+        payload.get("success") is False or "error" in payload
+    )
+    return types.CallToolResult(content=[types.TextContent(text=raw)], is_error=failed)
+
+
 @dataclass(frozen=True, slots=True)
 class CatalogEntry:
     tool: types.Tool
@@ -172,6 +199,7 @@ class Gateway:
         self.discovery: ToolDiscovery | None = None
         self.missing_final_tools: set[str] = set()
         self.web_tools_ready = False
+        self._deferred_image = False
         self._web_probe_at = time.monotonic()
         self._web_probe_lock = asyncio.Lock()
 
@@ -252,6 +280,10 @@ class Gateway:
             )
             context_names = {tool.name for tool in context_tools}
             hermes_names = {tool.name for tool in hermes_tools}
+            if "image_generate" not in hermes_names:
+                hermes_tools.append(deferred_image_tool())
+                hermes_names.add("image_generate")
+                self._deferred_image = True
             context_missing = missing_expected(context_names, CONTEXT_REQUIRED)
             hermes_missing = missing_expected(hermes_names, HERMES_REQUIRED)
             if not (hermes_names & IMAGE_TOOLS):
@@ -338,7 +370,9 @@ class Gateway:
             if entry.source == "context":
                 result = await self.context.call(name, arguments)
             elif entry.source == "hermes":
-                if name == "vision_analyze":
+                if name == "image_generate" and self._deferred_image:
+                    result = await asyncio.to_thread(call_deferred_image, arguments)
+                elif name == "vision_analyze":
                     result = await self.hermes.call_vision(arguments)
                     preserve_images = True
                 elif name in BROWSER_TOOLS:
@@ -426,6 +460,8 @@ class Gateway:
                     self.hermes.discover(), timeout=self.config.health_timeout_seconds
                 )
                 names = {tool.name for tool in tools}
+                if self._deferred_image and "image_generate" in self.catalog:
+                    names.add("image_generate")
                 missing = missing_expected(names, HERMES_REQUIRED)
                 if not (names & IMAGE_TOOLS):
                     missing.add("image_generate")
