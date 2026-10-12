@@ -9,6 +9,7 @@ from contextlib import AsyncExitStack
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
+from uuid import uuid4
 
 import httpx
 from mcp import ClientSession, StdioServerParameters, types
@@ -40,7 +41,7 @@ def _vision_value_to_result(value: Any) -> types.CallToolResult:
     ):
         raise TypeError("Hermes vision returned an unsupported result shape")
 
-    content: list[types.TextContent | types.ImageContent] = []
+    content: list[types.ContentBlock] = []
     for part in value["content"]:
         if not isinstance(part, dict):
             continue
@@ -612,8 +613,9 @@ class HermesToolsClient:
         return result
 
     async def call_direct(
-        self, name: str, arguments: dict[str, Any], *, task_id: str
+        self, name: str, arguments: dict[str, Any], *, task_id: str | None
     ) -> types.CallToolResult:
+        from gateway.session_context import clear_session_vars, set_session_vars
         from model_tools import handle_function_call
 
         if name == "process_manage" and arguments.get("action") != "list":
@@ -626,16 +628,33 @@ class HermesToolsClient:
                     session.task_id,
                     session.session_key,
                 }:
-                    raise PermissionError("process session belongs to another MCP session")
+                    raise PermissionError(
+                        "process session belongs to another MCP session"
+                    )
 
-        value = await asyncio.to_thread(
-            handle_function_call,
-            name,
-            arguments,
-            task_id=task_id,
-            session_id=task_id,
-            enabled_toolsets=list(DIRECT_HERMES_TOOLSETS),
-        )
+        def dispatch() -> str:
+            # Native terminal backends key cwd/env by HERMES_SESSION_KEY, not
+            # handle_function_call's task_id alone. Bind only in this worker's
+            # copied ContextVars; never mutate process env or inherit a chat route.
+            tokens = set_session_vars(
+                session_key=task_id or "",
+                session_id=task_id or "",
+                async_delivery=False,
+                session_history_delivery="",
+            )
+            try:
+                return handle_function_call(
+                    name,
+                    arguments,
+                    task_id=task_id,
+                    session_id=task_id,
+                    tool_call_id=uuid4().hex,
+                    enabled_toolsets=list(DIRECT_HERMES_TOOLSETS),
+                )
+            finally:
+                clear_session_vars(tokens)
+
+        value = await asyncio.to_thread(dispatch)
         if not isinstance(value, str):
             raise TypeError(f"Hermes tool {name} returned unsupported result type")
         return types.CallToolResult(content=[types.TextContent(text=value)])
@@ -646,10 +665,16 @@ class HermesToolsClient:
         from model_tools import handle_function_call
 
         value = await asyncio.to_thread(
-            handle_function_call, name, arguments, task_id=task_id
+            handle_function_call,
+            name,
+            arguments,
+            task_id=task_id,
+            tool_call_id=uuid4().hex,
         )
         if not isinstance(value, str):
-            raise TypeError(f"Hermes browser tool {name} returned unsupported result type")
+            raise TypeError(
+                f"Hermes browser tool {name} returned unsupported result type"
+            )
 
         # Camofox deliberately returns HTTP 410 when a known tab was destroyed
         # (browser restart, crash, or tab reaper). The pinned Hermes client only
@@ -660,7 +685,11 @@ class HermesToolsClient:
             _reset_camofox_session(task_id)
             if name == "browser_navigate":
                 value = await asyncio.to_thread(
-                    handle_function_call, name, arguments, task_id=task_id
+                    handle_function_call,
+                    name,
+                    arguments,
+                    task_id=task_id,
+                    tool_call_id=uuid4().hex,
                 )
             if _browser_result_is_stale(value):
                 value = _stale_browser_result()
@@ -671,7 +700,7 @@ class HermesToolsClient:
         from model_tools import handle_function_call
 
         value = await asyncio.to_thread(
-            handle_function_call, "vision_analyze", arguments
+            handle_function_call, "vision_analyze", arguments, tool_call_id=uuid4().hex
         )
         return _vision_value_to_result(value)
 

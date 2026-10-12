@@ -26,6 +26,7 @@ from .config import (
     HERMES_REQUIRED,
     IMAGE_TOOLS,
     SAMCHON_GRAPH_TOOL,
+    STATEFUL_HERMES_TOOLS,
     WEB_TOOLS,
     GatewayConfig,
 )
@@ -43,18 +44,13 @@ from .upstreams import (
 logger = logging.getLogger("hermes_mcp_gateway")
 
 
-def browser_task_id(ctx: Any) -> str:
-    request = getattr(ctx, "request", None)
-    headers = getattr(request, "headers", None)
-    session_id = headers.get("mcp-session-id") if headers is not None else None
-    if not session_id:
-        connection = getattr(getattr(ctx, "session", None), "_connection", None)
-        session_id = getattr(connection, "session_id", None)
-    if not session_id:
-        raise PermissionError(
-            "MCP session identity is required for deferred tools"
-        )
-    return f"chatgpt:{session_id}"
+def browser_task_id(ctx: Any) -> str | None:
+    # MCP 2.0 lowlevel ServerRequestContext carries the validated connection
+    # here. Modern (2026-07-28) HTTP has no protocol session, even when
+    # stateless_http=False. Never trust a raw client-supplied session header.
+    connection = getattr(getattr(ctx, "session", None), "_connection", None)
+    session_id = getattr(connection, "session_id", None)
+    return f"chatgpt:{session_id}" if session_id else None
 
 
 def deferred_image_tool() -> types.Tool:
@@ -373,6 +369,12 @@ class Gateway:
             return error_result(
                 f"Unknown or disallowed tool: {name}", limit=self.config.max_text_chars
             )
+        if name in STATEFUL_HERMES_TOOLS and not task_id:
+            return error_result(
+                "MCP session identity is required for stateful browser/process tools. "
+                "Use a stateful MCP client; independent commands can use ctx_execute.",
+                limit=self.config.max_text_chars,
+            )
         try:
             preserve_images = False
             if entry.source == "context":
@@ -384,12 +386,13 @@ class Gateway:
                     result = await self.hermes.call_vision(arguments)
                     preserve_images = True
                 elif name in BROWSER_TOOLS:
+                    assert task_id is not None  # enforced before upstream dispatch
                     result = await self.hermes.call_browser(
-                        name, arguments, task_id=task_id or "chatgpt:gateway"
+                        name, arguments, task_id=task_id
                     )
                 elif name in DIRECT_HERMES_TOOLS:
                     result = await self.hermes.call_direct(
-                        name, arguments, task_id=task_id or "chatgpt:gateway"
+                        name, arguments, task_id=task_id
                     )
                 else:
                     result = await self.hermes.call(name, arguments)
@@ -533,10 +536,7 @@ def create_app(config: GatewayConfig | None = None):
                 f"Unknown or disallowed tool: {params.name}",
                 limit=gateway.config.max_text_chars,
             )
-        try:
-            task_id = browser_task_id(_ctx) if params.name == "tool_call" else None
-        except PermissionError as exc:
-            return error_result(str(exc), limit=gateway.config.max_text_chars)
+        task_id = browser_task_id(_ctx) if params.name == "tool_call" else None
         return await gateway.call(params.name, params.arguments or {}, task_id=task_id)
 
     server = Server(
@@ -563,7 +563,9 @@ def create_app(config: GatewayConfig | None = None):
 
     return server.streamable_http_app(
         streamable_http_path="/mcp",
-        json_response=True,
+        # MCP 2.0's modern JSON-only path does not watch HTTP disconnects.
+        # The default JSON/SSE path cancels the handler and downstream HTTP call.
+        json_response=False,
         stateless_http=False,
         host=gateway.config.host,
         custom_starlette_routes=[Route("/healthz", healthz), Route("/readyz", readyz)],

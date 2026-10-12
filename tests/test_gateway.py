@@ -486,21 +486,20 @@ class BrowserGatewayTests(unittest.IsolatedAsyncioTestCase):
         )
         gateway.hermes.call.assert_not_awaited()
 
-    def test_browser_task_id_prefers_mcp_session_header(self):
+    def test_browser_task_id_uses_sdk_session_connection(self):
         from hermes_mcp_gateway.server import browser_task_id
 
         ctx = SimpleNamespace(
             request=SimpleNamespace(headers={"mcp-session-id": "session-a"}),
-            session=SimpleNamespace(),
+            session=SimpleNamespace(_connection=SimpleNamespace(session_id="session-a")),
         )
         self.assertEqual(browser_task_id(ctx), "chatgpt:session-a")
 
-    def test_browser_task_id_rejects_missing_session(self):
+    def test_browser_task_id_returns_none_without_transport_session(self):
         from hermes_mcp_gateway.server import browser_task_id
 
         ctx = SimpleNamespace(request=None, session=SimpleNamespace())
-        with self.assertRaisesRegex(PermissionError, "session"):
-            browser_task_id(ctx)
+        self.assertIsNone(browser_task_id(ctx))
 
 
 class VisionGatewayTests(unittest.IsolatedAsyncioTestCase):

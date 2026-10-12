@@ -49,6 +49,10 @@ BROWSER_TOOLS = frozenset(
 
 IMAGE_TOOLS = frozenset({"image_generate"})
 
+# These tools retain resources across calls; unlike Context Mode execution,
+# even foreground terminal calls retain cwd/environment state.
+STATEFUL_HERMES_TOOLS = BROWSER_TOOLS | frozenset({"terminal", "process_manage"})
+
 HERMES_ALLOWLIST = frozenset(
     {
         "web_search",

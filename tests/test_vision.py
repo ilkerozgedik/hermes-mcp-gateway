@@ -1,5 +1,5 @@
 import unittest
-from unittest.mock import patch
+from unittest.mock import ANY, patch
 
 from mcp import types
 
@@ -54,7 +54,7 @@ class VisionClientTests(unittest.IsolatedAsyncioTestCase):
         }
         with patch("model_tools.handle_function_call", return_value=envelope) as dispatch:
             result = await client.call_vision({"image_url": "x", "question": "y"})
-        dispatch.assert_called_once_with("vision_analyze", {"image_url": "x", "question": "y"})
+        dispatch.assert_called_once_with("vision_analyze", {"image_url": "x", "question": "y"}, tool_call_id=ANY)
         self.assertIsInstance(result.content[1], types.ImageContent)
 
 
