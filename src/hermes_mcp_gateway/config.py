@@ -86,6 +86,7 @@ class GatewayConfig:
     samchon_graph_schema_cwd: str = "/srv/agents/src/hermes-mcp-gateway"
     samchon_graph_allowed_roots: tuple[str, ...] = (
         "/home/hermes/work",
+        "/home/hermes/worktrees",
         "/srv/agents/src",
     )
     samchon_graph_max_sessions: int = 4

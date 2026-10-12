@@ -50,7 +50,11 @@ def browser_task_id(ctx: Any) -> str:
     if not session_id:
         connection = getattr(getattr(ctx, "session", None), "_connection", None)
         session_id = getattr(connection, "session_id", None)
-    return f"chatgpt:{session_id}" if session_id else "chatgpt:gateway"
+    if not session_id:
+        raise PermissionError(
+            "MCP session identity is required for deferred tools"
+        )
+    return f"chatgpt:{session_id}"
 
 
 def deferred_image_tool() -> types.Tool:
@@ -255,12 +259,16 @@ class Gateway:
             self._tool_result_has_error(search) or self._tool_result_has_error(extract)
         )
 
+    def _web_probe_fresh(self) -> bool:
+        ttl = 300 if self.web_tools_ready else 30
+        return time.monotonic() - self._web_probe_at < ttl
+
     async def refresh_web_tools(self) -> bool:
-        # Cache provider probes so /readyz does not issue a search on every call.
-        if time.monotonic() - self._web_probe_at < 60:
+        # Cheap cached status; only a stale readiness check probes providers.
+        if self._web_probe_fresh():
             return self.web_tools_ready
         async with self._web_probe_lock:
-            if time.monotonic() - self._web_probe_at < 60:
+            if self._web_probe_fresh():
                 return self.web_tools_ready
             try:
                 self.web_tools_ready = await asyncio.wait_for(
@@ -525,7 +533,10 @@ def create_app(config: GatewayConfig | None = None):
                 f"Unknown or disallowed tool: {params.name}",
                 limit=gateway.config.max_text_chars,
             )
-        task_id = browser_task_id(_ctx) if params.name == "tool_call" else None
+        try:
+            task_id = browser_task_id(_ctx) if params.name == "tool_call" else None
+        except PermissionError as exc:
+            return error_result(str(exc), limit=gateway.config.max_text_chars)
         return await gateway.call(params.name, params.arguments or {}, task_id=task_id)
 
     server = Server(
@@ -541,7 +552,8 @@ def create_app(config: GatewayConfig | None = None):
     )
 
     async def healthz(_request: Request):
-        return JSONResponse(await gateway.health())
+        # Liveness must not run upstream discovery, LSP, or paid web probes.
+        return JSONResponse({"status": "ok"})
 
     async def readyz(_request: Request):
         payload = await gateway.health()
@@ -552,7 +564,7 @@ def create_app(config: GatewayConfig | None = None):
     return server.streamable_http_app(
         streamable_http_path="/mcp",
         json_response=True,
-        stateless_http=True,
+        stateless_http=False,
         host=gateway.config.host,
         custom_starlette_routes=[Route("/healthz", healthz), Route("/readyz", readyz)],
     )

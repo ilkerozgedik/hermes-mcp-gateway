@@ -58,16 +58,22 @@ if __name__ == "__main__":
 
 
 class ContextTransportTests(unittest.IsolatedAsyncioTestCase):
-    async def test_rpc_runs_sync_http_client_in_worker_thread(self):
-        from unittest.mock import AsyncMock, patch
+    async def test_rpc_uses_cancelable_async_transport(self):
+        import asyncio
+        from unittest.mock import patch
 
         client = ContextModeClient("http://127.0.0.1:3050/mcp")
-        with patch(
-            "hermes_mcp_gateway.upstreams.asyncio.to_thread",
-            new=AsyncMock(return_value={"tools": []}),
-        ) as to_thread:
-            result = await client._rpc("tools/list")
-        self.assertEqual(result, {"tools": []})
-        self.assertIs(to_thread.await_args.args[0].__self__, client)
-        self.assertEqual(to_thread.await_args.args[0].__name__, "_rpc_with_retry")
-        self.assertEqual(to_thread.await_args.args[1:], ("tools/list", None))
+        waiting = asyncio.Event()
+        try:
+            async def blocked(*_args, **_kwargs):
+                waiting.set()
+                await asyncio.Event().wait()
+
+            with patch.object(client._client, "post", side_effect=blocked):
+                task = asyncio.create_task(client._rpc("tools/list"))
+                await waiting.wait()
+                task.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await asyncio.wait_for(task, 1)
+        finally:
+            await client.close()

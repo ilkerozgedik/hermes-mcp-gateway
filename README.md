@@ -8,11 +8,11 @@ Single localhost-only MCP endpoint that aggregates Context Mode, a strict Hermes
 - Process health: `http://127.0.0.1:3060/healthz`
 - Final-cutover readiness: `http://127.0.0.1:3060/readyz`
 
-`healthz` stays available when a running upstream later degrades. `readyz` is `200` only when Context Mode, the curated Hermes tools including web, the guarded Hermes capability runtime, and Honcho are all available. Tool discovery is frozen for the process lifetime; provider/config changes require a gateway restart, keeping MCP schemas stable within a running process.
+`healthz` is a local liveness check that never calls upstream providers. The gateway uses native stateful MCP session IDs to isolate browser/process ownership; deferred calls without a session ID fail closed. `readyz` is `200` only when Context Mode, the curated Hermes tools including web, the guarded Hermes capability runtime, and Honcho are all available. Tool discovery is frozen for the process lifetime; provider/config changes require a gateway restart, keeping MCP schemas stable within a running process.
 
 ## Tool policy
 
-The complete 56-tool allowlisted catalog remains available, but `tools/list` exposes only six tools: `tool_search`, `tool_describe`, `tool_call`, `startup_context`, `memory_context`, and `skills_list`. The other 53 tools are accessible only through the discovery bridge. Search uses Hermes' native BM25 implementation over the frozen Gateway catalog (no separate search service/index); `tool_describe` returns authoritative MCP input schemas. `tool_call` executes **one** described tool via the existing Gateway dispatcher. Direct MCP calls to hidden tools fail closed. Gateway safety policies and backend ownership do not change.
+The underlying 50-tool allowlisted catalog remains available, but `tools/list` exposes only six tools: `tool_search`, `tool_describe`, `tool_call`, `startup_context`, `memory_context`, and `skills_list`. The remaining tools are accessible only through the discovery bridge. Search uses Hermes' native BM25 implementation over the frozen Gateway catalog (no separate search service/index); `tool_describe` returns authoritative MCP input schemas. `tool_call` executes **one** described tool via the existing Gateway dispatcher. Direct MCP calls to hidden tools fail closed. Gateway safety policies and backend ownership do not change.
 
 Hermes is default-deny and may expose only:
 
@@ -34,7 +34,7 @@ Guarded Hermes capabilities are:
 - `delegate_task` — synchronous leaf delegation only, one or two children maximum, and `confirmed=true` after explicit user approval because it spends model inference. Children inherit only Hermes `web`, `vision`, `skills`, and the `mcp-context-mode` toolset. Context Mode MCP tools are reached through Hermes' scoped `tool_search`/`tool_describe`/`tool_call` bridge; native Hermes terminal/file/code tools and recursive delegation remain out of scope.
 - `cronjob` — read-only `list`, plus guarded `create`, `update`, `pause`, `resume`, `remove`, and `run`. Mutations require `confirmed=true`. Model/provider/base-URL overrides and script/no-agent/monitor execution fields are not exposed; delivery defaults to `local`.
 
-The underlying catalog is 50 tools without the opt-in Coordinator, or 56 with its six tools enabled. Both configurations expose the same six public tools. No tools are dynamically added to the catalog during a session; a Gateway restart refreshes discovery. A new ChatGPT MCP connection may be required to refresh the public schemas.
+The catalog exposes exactly six public tools. Native Git worktrees replace the retired coordinator; no optional coordinator service is needed. No tools are dynamically added to the catalog during a session; a Gateway restart refreshes discovery. A new ChatGPT MCP connection may be required to refresh the public schemas.
 
 Gateway-owned startup tool:
 

@@ -192,47 +192,56 @@ class GatewayPolicyTests(unittest.TestCase):
         )
 
 
-class ReconnectionTests(unittest.TestCase):
-    def test_gateway_uses_stateless_http_sessions(self):
+class ReconnectionTests(unittest.IsolatedAsyncioTestCase):
+    def test_gateway_uses_stateful_http_sessions(self):
         with patch("hermes_mcp_gateway.server.Server") as server:
             create_app()
-        self.assertTrue(server.return_value.streamable_http_app.call_args.kwargs["stateless_http"])
+        self.assertFalse(server.return_value.streamable_http_app.call_args.kwargs["stateless_http"])
 
-    def test_read_only_context_call_recovers_from_connection_reset(self):
+    async def test_read_only_context_call_recovers_from_connection_reset(self):
+        import httpx
         client = ContextModeClient("http://127.0.0.1:3050/mcp")
         params = {"name": "ctx_search", "arguments": {"queries": ["needle"]}}
-        with patch.object(client, "_rpc_sync", side_effect=[ConnectionResetError(), {"content": []}]) as rpc, patch("hermes_mcp_gateway.upstreams.time.sleep") as sleep:
-            self.assertEqual(client._rpc_with_retry("tools/call", params), {"content": []})
-        self.assertEqual(rpc.call_count, 2)
-        sleep.assert_called_once()
+        with patch.object(client, "_rpc_once", new_callable=AsyncMock, side_effect=[httpx.ReadError("reset"), {"content": []}]) as rpc, patch("hermes_mcp_gateway.upstreams.asyncio.sleep", new_callable=AsyncMock) as sleep:
+            self.assertEqual(await client._rpc_with_retry("tools/call", params), {"content": []})
+        self.assertEqual(rpc.await_count, 2)
+        sleep.assert_awaited_once()
+        await client.close()
 
-    def test_read_only_context_call_stops_after_bounded_retries(self):
+    async def test_read_only_context_call_stops_after_bounded_retries(self):
+        import httpx
         client = ContextModeClient("http://127.0.0.1:3050/mcp")
-        with patch.object(client, "_rpc_sync", side_effect=ConnectionResetError()) as rpc, patch("hermes_mcp_gateway.upstreams.time.sleep") as sleep, self.assertRaises(ConnectionResetError):
-            client._rpc_with_retry("tools/call", {"name": "ctx_doctor", "arguments": {}})
-        self.assertEqual(rpc.call_count, 5)
-        self.assertEqual(sleep.call_count, 4)
+        with patch.object(client, "_rpc_once", new_callable=AsyncMock, side_effect=httpx.ReadError("reset")) as rpc, patch("hermes_mcp_gateway.upstreams.asyncio.sleep", new_callable=AsyncMock) as sleep, self.assertRaises(httpx.ReadError):
+            await client._rpc_with_retry("tools/call", {"name": "ctx_doctor", "arguments": {}})
+        self.assertEqual(rpc.await_count, 5)
+        self.assertEqual(sleep.await_count, 4)
+        await client.close()
 
-    def test_write_tools_never_retry_after_connection_loss(self):
+    async def test_write_tools_never_retry_after_connection_loss(self):
+        import httpx
         client = ContextModeClient("http://127.0.0.1:3050/mcp")
         for tool in ("ctx_execute", "ctx_index", "ctx_purge", "ctx_fetch_and_index"):
-            with self.subTest(tool=tool), patch.object(client, "_rpc_sync", side_effect=ConnectionResetError()) as rpc:
-                with self.assertRaises(ConnectionResetError):
-                    client._rpc_with_retry("tools/call", {"name": tool, "arguments": {}})
-                rpc.assert_called_once()
+            with self.subTest(tool=tool), patch.object(client, "_rpc_once", new_callable=AsyncMock, side_effect=httpx.ReadError("reset")) as rpc:
+                with self.assertRaises(httpx.ReadError):
+                    await client._rpc_with_retry("tools/call", {"name": tool, "arguments": {}})
+                rpc.assert_awaited_once()
+        await client.close()
 
-    def test_application_errors_are_not_retried(self):
+    async def test_application_errors_are_not_retried(self):
         client = ContextModeClient("http://127.0.0.1:3050/mcp")
-        with patch.object(client, "_rpc_sync", side_effect=RuntimeError("Context Mode HTTP 503")) as rpc:
+        with patch.object(client, "_rpc_once", new_callable=AsyncMock, side_effect=RuntimeError("Context Mode HTTP 503")) as rpc:
             with self.assertRaisesRegex(RuntimeError, "503"):
-                client._rpc_with_retry("tools/call", {"name": "ctx_search", "arguments": {}})
-            rpc.assert_called_once()
+                await client._rpc_with_retry("tools/call", {"name": "ctx_search", "arguments": {}})
+            rpc.assert_awaited_once()
+        await client.close()
 
-    def test_tool_discovery_recovers_after_connection_refused(self):
+    async def test_tool_discovery_recovers_after_connection_refused(self):
+        import httpx
         client = ContextModeClient("http://127.0.0.1:3050/mcp")
-        with patch.object(client, "_rpc_sync", side_effect=[ConnectionRefusedError(), {"tools": []}]) as rpc, patch("hermes_mcp_gateway.upstreams.time.sleep"):
-            self.assertEqual(client._rpc_with_retry("tools/list"), {"tools": []})
-            self.assertEqual(rpc.call_count, 2)
+        with patch.object(client, "_rpc_once", new_callable=AsyncMock, side_effect=[httpx.ConnectError("refused"), {"tools": []}]) as rpc, patch("hermes_mcp_gateway.upstreams.asyncio.sleep", new_callable=AsyncMock):
+            self.assertEqual(await client._rpc_with_retry("tools/list"), {"tools": []})
+            self.assertEqual(rpc.await_count, 2)
+        await client.close()
 
 
 if __name__ == "__main__":
@@ -242,6 +251,11 @@ if __name__ == "__main__":
 
 
 class SamchonGraphGatewayTests(unittest.TestCase):
+    def test_default_roots_include_agent_worktrees(self):
+        from hermes_mcp_gateway.config import GatewayConfig
+
+        self.assertIn("/home/hermes/worktrees", GatewayConfig().samchon_graph_allowed_roots)
+
     def test_public_tool_requires_gateway_cwd(self):
         upstream = types.Tool(
             name="inspect_code_graph",
@@ -481,11 +495,12 @@ class BrowserGatewayTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(browser_task_id(ctx), "chatgpt:session-a")
 
-    def test_browser_task_id_has_safe_fallback(self):
+    def test_browser_task_id_rejects_missing_session(self):
         from hermes_mcp_gateway.server import browser_task_id
 
         ctx = SimpleNamespace(request=None, session=SimpleNamespace())
-        self.assertEqual(browser_task_id(ctx), "chatgpt:gateway")
+        with self.assertRaisesRegex(PermissionError, "session"):
+            browser_task_id(ctx)
 
 
 class VisionGatewayTests(unittest.IsolatedAsyncioTestCase):
@@ -689,6 +704,15 @@ class OutputSanitizationTests(unittest.TestCase):
 
 
 class WebReadinessProbeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_liveness_does_not_probe_provider(self):
+        from hermes_mcp_gateway.server import create_app
+
+        app = create_app()
+        route = next(route for route in app.routes if getattr(route, 'path', None) == '/healthz')
+        response = await route.endpoint(None)
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b'"status":"ok"', response.body)
+
     async def test_cached_web_probe_recovers_after_expiry(self):
         from hermes_mcp_gateway.server import Gateway
 

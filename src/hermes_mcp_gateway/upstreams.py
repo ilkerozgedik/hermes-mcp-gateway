@@ -2,16 +2,15 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import http.client
 import json
 import os
-import time
 from collections import OrderedDict
 from contextlib import AsyncExitStack
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
+import httpx
 from mcp import ClientSession, StdioServerParameters, types
 from mcp.client.stdio import stdio_client
 
@@ -131,11 +130,9 @@ class ContextModeClient:
         parsed = urlsplit(url)
         if parsed.scheme != "http" or not parsed.hostname:
             raise ValueError("Context Mode URL must be plain HTTP")
-        self._host = parsed.hostname
-        self._port = parsed.port or 80
-        self._path = parsed.path or "/"
+        self._client = httpx.AsyncClient(timeout=timeout, trust_env=False)
 
-    def _rpc_sync(
+    async def _rpc_once(
         self, method: str, params: dict[str, Any] | None = None
     ) -> dict[str, Any]:
         meta = {
@@ -151,8 +148,7 @@ class ContextModeClient:
             "Accept": "application/json, text/event-stream",
             "MCP-Protocol-Version": _PROTOCOL,
             "Mcp-Method": method,
-            "Connection": "close",
-        }
+         }
         if method == "tools/call" and params and params.get("name"):
             headers["Mcp-Name"] = str(params["name"])
         body = {
@@ -161,26 +157,18 @@ class ContextModeClient:
             "method": method,
             "params": {**(params or {}), "_meta": meta},
         }
-        connection = http.client.HTTPConnection(
-            self._host, self._port, timeout=self.timeout
-        )
+        response = await self._client.post(self.url, json=body, headers=headers)
         try:
-            connection.request("POST", self._path, json.dumps(body), headers)
-            response = connection.getresponse()
-            raw = response.read()
-        finally:
-            connection.close()
-        try:
-            payload = json.loads(raw)
+            payload = response.json()
         except json.JSONDecodeError as exc:
             raise RuntimeError("Context Mode returned invalid JSON") from exc
-        if response.status != 200:
+        if response.status_code != 200:
             message = (
                 payload.get("error", {}).get("message")
                 if isinstance(payload, dict)
                 else None
             )
-            raise RuntimeError(message or f"Context Mode HTTP {response.status}")
+            raise RuntimeError(message or f"Context Mode HTTP {response.status_code}")
         if payload.get("error"):
             error = payload["error"]
             raise RuntimeError(str(error.get("message") or "Context Mode MCP error"))
@@ -189,7 +177,7 @@ class ContextModeClient:
             raise TypeError("Context Mode returned an invalid MCP result")
         return result
 
-    def _rpc_with_retry(
+    async def _rpc_with_retry(
         self, method: str, params: dict[str, Any] | None = None
     ) -> dict[str, Any]:
         retryable = method == "tools/list" or (
@@ -199,17 +187,17 @@ class ContextModeClient:
         )
         for attempt in range(5 if retryable else 1):
             try:
-                return self._rpc_sync(method, params)
-            except (ConnectionError, http.client.IncompleteRead):
+                return await self._rpc_once(method, params)
+            except (httpx.ConnectError, httpx.ReadError, httpx.RemoteProtocolError):
                 if not retryable or attempt == 4:
                     raise
-                time.sleep(0.4 * (2 ** attempt))
+                await asyncio.sleep(0.4 * (2 ** attempt))
         raise AssertionError("unreachable")
 
     async def _rpc(
         self, method: str, params: dict[str, Any] | None = None
     ) -> dict[str, Any]:
-        return await asyncio.to_thread(self._rpc_with_retry, method, params)
+        return await self._rpc_with_retry(method, params)
 
     async def discover(self) -> list[types.Tool]:
         result = await self._rpc("tools/list")
@@ -226,7 +214,7 @@ class ContextModeClient:
         return types.CallToolResult.model_validate(result)
 
     async def close(self) -> None:
-        return None
+        await self._client.aclose()
 
 
 class _SamchonGraphSession:
