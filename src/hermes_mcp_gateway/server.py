@@ -307,8 +307,6 @@ class Gateway:
             self.web_tools_ready = (
                 not web_schema_missing and await self.probe_web_tools()
             )
-            if not web_schema_missing and not self.web_tools_ready:
-                self.web_tools_ready = await self.probe_web_tools()
             self._web_probe_at = time.monotonic()
             self.missing_final_tools = set() if self.web_tools_ready else set(WEB_TOOLS)
             await self.memory.start()

@@ -775,7 +775,7 @@ class WebReadinessProbeTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(await gateway.probe_web_tools())
 
-    async def test_start_retries_one_transient_web_probe_failure(self):
+    async def test_start_does_not_duplicate_failed_web_probe(self):
         from hermes_mcp_gateway.config import IMAGE_TOOLS
         from hermes_mcp_gateway.server import Gateway
 
@@ -789,13 +789,13 @@ class WebReadinessProbeTests(unittest.IsolatedAsyncioTestCase):
         )
         gateway.graph.describe = AsyncMock(return_value=tool(SAMCHON_GRAPH_TOOL))
         gateway.memory.start = AsyncMock()
-        gateway.probe_web_tools = AsyncMock(side_effect=[False, True])
+        gateway.probe_web_tools = AsyncMock(return_value=False)
 
         await gateway.start()
 
-        self.assertTrue(gateway.web_tools_ready)
-        self.assertEqual(gateway.missing_final_tools, set())
-        self.assertEqual(gateway.probe_web_tools.await_count, 2)
+        self.assertFalse(gateway.web_tools_ready)
+        self.assertEqual(gateway.missing_final_tools, set(WEB_TOOLS))
+        self.assertEqual(gateway.probe_web_tools.await_count, 1)
 
 
 class HermesCapabilityGatewayTests(unittest.IsolatedAsyncioTestCase):
