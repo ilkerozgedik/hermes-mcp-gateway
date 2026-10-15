@@ -1,19 +1,15 @@
-"""Exercise the official Tunnel Client against a real Gateway, without hosted keys.
+"""Exercise the real Gateway Streamable HTTP endpoint, without hosted keys.
 
-This uses the released client's local control plane, not simulated MCP responses.
-It opens an isolated legacy browser tab and runs a harmless foreground command.
-It does not prove ChatGPT workspace/connector permissions; test those in ChatGPT.
+The runtime Tunnel Client has no local proxy/test ingress. This verifies MCP
+protocol behavior directly; the managed Tunnel Client service is separately
+validated by the bootstrap service readiness checker.
 """
 from __future__ import annotations
 
 import argparse
 import asyncio
 import json
-import os
 from pathlib import Path
-import subprocess
-import tempfile
-import time
 import uuid
 
 import httpx
@@ -70,23 +66,23 @@ async def exercise(url: str, report: dict) -> None:
         assert not described.get("isError"), text(described)
         report["checks"]["modern_describe"] = True
         read = await call("read_file", {"path": str(Path(__file__).resolve()), "limit": 2})
-        assert "official Tunnel Client" in text(read)
+        assert "Gateway Streamable HTTP endpoint" in text(read)
         report["checks"]["modern_native_file"] = True
         executed = await call("execute_code", {
-            "code": "from hermes_tools import terminal\nprint(terminal('printf tunnel-native-ok'))",
+            "code": "from hermes_tools import terminal\nprint(terminal('printf gateway-http-native-ok'))",
         })
         assert json.loads(text(executed)).get("status") == "success", text(executed)
-        assert "tunnel-native-ok" in text(executed)
+        assert "gateway-http-native-ok" in text(executed)
         report["checks"]["modern_native_execution"] = True
         opened = await call("session_open", {})
         token = json.loads(text(opened))["session_token"]
         assert isinstance(token, str) and len(token) >= 32
         try:
-            await call("terminal", {"command": "export MCP_LEASE_MARKER=tunnel-lease-ok"},
+            await call("terminal", {"command": "export MCP_LEASE_MARKER=gateway-http-lease-ok"},
                        session_token=token)
             terminal = await call("terminal", {"command": "printf '%s' \"$MCP_LEASE_MARKER\""},
                                   session_token=token)
-            assert "tunnel-lease-ok" in text(terminal), text(terminal)
+            assert "gateway-http-lease-ok" in text(terminal), text(terminal)
             report["checks"]["modern_terminal_continuity"] = True
             browser = await call("browser_navigate", {"url": "https://example.com"},
                                  session_token=token)
@@ -114,72 +110,41 @@ async def exercise(url: str, report: dict) -> None:
         protocol = initialized["protocolVersion"]
         assert protocol != PROTOCOL, protocol
         legacy = {"Mcp-Session-Id": session, "MCP-Protocol-Version": protocol}
-        try:
-            notification = await client.post(url, headers={
-                "Accept": "application/json, text/event-stream", **legacy,
-            }, json={"jsonrpc": "2.0", "method": "notifications/initialized"})
-            notification.raise_for_status()
-            terminal = await call("terminal", {"command": "printf tunnel-terminal-ok"},
-                                  headers=legacy)
-            assert "tunnel-terminal-ok" in text(terminal), text(terminal)
-            report["checks"]["legacy_native_terminal"] = True
-            browser = await call("browser_navigate", {"url": "https://example.com"},
-                                 headers=legacy)
-            browser_payload = json.loads(text(browser))
-            assert browser_payload.get("success") is True, text(browser)
-            assert browser_payload.get("url", "").rstrip("/") == "https://example.com", text(browser)
-            assert browser_payload.get("snapshot"), text(browser)
-            snapshot = await call("browser_snapshot", {}, headers=legacy)
-            snapshot_payload = json.loads(text(snapshot))
-            assert snapshot_payload.get("success") is True, text(snapshot)
-            assert snapshot_payload.get("snapshot"), text(snapshot)
-            report["checks"]["legacy_browser_navigate_snapshot"] = True
-            report["checks"]["legacy_initialize"] = {"protocol": protocol}
-        finally:
-            # The local tunnel ingress is POST-only. Closing its listener below
-            # ends this isolated test; do not DELETE the real Gateway endpoint.
-            pass
+        notification = await client.post(url, headers={
+            "Accept": "application/json, text/event-stream", **legacy,
+        }, json={"jsonrpc": "2.0", "method": "notifications/initialized"})
+        notification.raise_for_status()
+        terminal = await call("terminal", {"command": "printf gateway-http-terminal-ok"},
+                              headers=legacy)
+        assert "gateway-http-terminal-ok" in text(terminal), text(terminal)
+        report["checks"]["legacy_native_terminal"] = True
+        browser = await call("browser_navigate", {"url": "https://example.com"},
+                             headers=legacy)
+        browser_payload = json.loads(text(browser))
+        assert browser_payload.get("success") is True, text(browser)
+        assert browser_payload.get("url", "").rstrip("/") == "https://example.com", text(browser)
+        assert browser_payload.get("snapshot"), text(browser)
+        snapshot = await call("browser_snapshot", {}, headers=legacy)
+        snapshot_payload = json.loads(text(snapshot))
+        assert snapshot_payload.get("success") is True, text(snapshot)
+        assert snapshot_payload.get("snapshot"), text(snapshot)
+        report["checks"]["legacy_browser_navigate_snapshot"] = True
+        report["checks"]["legacy_initialize"] = {"protocol": protocol}
 
 
 async def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--url", default="http://127.0.0.1:3060/mcp")
-    parser.add_argument("--tunnel-client", default="/usr/local/bin/tunnel-client")
     parser.add_argument("--report", required=True)
     args = parser.parse_args()
     report = {"target": args.url, "checks": {}, "status": "failed"}
-    process = None
     try:
-        with tempfile.TemporaryDirectory(prefix="gateway-tunnel-", dir=os.environ["TMPDIR"]) as tmp:
-            url_file = Path(tmp) / "proxy.json"
-            log_path = Path(tmp) / "proxy.log"
-            with log_path.open("w+") as log:
-                process = subprocess.Popen([
-                    args.tunnel_client, "dev", "proxy", "--mcp-server-url", args.url,
-                    "--url-file", str(url_file), "--duration", "240s",
-                    "--readiness-timeout", "45s", "--response-timeout", "120s",
-                ], stdout=log, stderr=subprocess.STDOUT)
-                deadline = time.monotonic() + 55
-                while not url_file.exists():
-                    if process.poll() is not None or time.monotonic() >= deadline:
-                        log.seek(0)
-                        raise RuntimeError("Local tunnel did not start: " + log.read()[-4000:])
-                    await asyncio.sleep(0.1)
-                connection = json.loads(url_file.read_text())
-                report["local_proxy"] = connection
-                await exercise(connection["mcp_url"], report)
-                report["status"] = "passed"
+        await exercise(args.url, report)
+        report["status"] = "passed"
     except Exception as exc:
         report["error"] = str(exc)
         raise
     finally:
-        if process is not None and process.poll() is None:
-            process.terminate()
-            try:
-                process.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait(timeout=5)
         Path(args.report).write_text(json.dumps(report, indent=2), encoding="utf-8")
         print(json.dumps({"status": report["status"], "checks": report["checks"],
                           "report": args.report}, indent=2))
