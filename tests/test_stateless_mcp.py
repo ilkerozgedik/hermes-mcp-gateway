@@ -50,8 +50,12 @@ class StatelessHTTPTests(unittest.IsolatedAsyncioTestCase):
 
         async def fake_start(gateway):
             self.gateway = gateway
-            gateway.catalog = build_catalog(
+            from hermes_mcp_gateway.sessions import (
+                session_close_tool_schema,
+                session_open_tool_schema,
+            )
 
+            gateway.catalog = build_catalog(
                 [
                     tool(name)
                     for name in (
@@ -65,7 +69,11 @@ class StatelessHTTPTests(unittest.IsolatedAsyncioTestCase):
                     )
                 ],
                 [tool("memory_context")],
-                [tool("startup_context")],
+                [
+                    tool("startup_context"),
+                    session_open_tool_schema(),
+                    session_close_tool_schema(),
+                ],
             )
             gateway.discovery = ToolDiscovery(gateway.catalog)
             gateway.execution.call = AsyncMock(return_value=success())
@@ -140,7 +148,12 @@ class StatelessHTTPTests(unittest.IsolatedAsyncioTestCase):
         for item in reversed(self.patches):
             item.stop()
 
-    async def modern_call(self, name, arguments=None, *, extra_headers=None):
+    async def modern_call(self, name, arguments=None, *, session_token=None, extra_headers=None):
+        tool_call_arguments = {
+            "calls": [{"name": name, "arguments": arguments or {}}]
+        }
+        if session_token is not None:
+            tool_call_arguments["session_token"] = session_token
         response = await self.client.post(
             "/mcp",
             headers={
@@ -156,9 +169,7 @@ class StatelessHTTPTests(unittest.IsolatedAsyncioTestCase):
                 "method": "tools/call",
                 "params": {
                     "name": "tool_call",
-                    "arguments": {
-                        "calls": [{"name": name, "arguments": arguments or {}}]
-                    },
+                    "arguments": tool_call_arguments,
                     "_meta": {
                         "io.modelcontextprotocol/protocolVersion": PROTOCOL,
                         "io.modelcontextprotocol/clientInfo": {
@@ -220,6 +231,116 @@ class StatelessHTTPTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(result.is_error)
         self.gateway.hermes.call_browser.assert_not_awaited()
         self.gateway.hermes.call_direct.assert_not_awaited()
+
+    async def open_session_token(self):
+        result = await self.modern_call("session_open")
+        self.assertFalse(result.is_error, result.content[0].text)
+        payload = json.loads(result.content[0].text)
+        self.assertEqual(payload["expires_in_seconds"], 900)
+        self.assertRegex(payload["session_token"], r"^[A-Za-z0-9_-]{43}$")
+        # The capability is intentionally not passed through normal output redaction.
+        self.assertIn(payload["session_token"], result.content[0].text)
+        return payload["session_token"]
+
+    async def test_modern_capability_lifecycle_and_owner_isolation(self):
+        first, second = await asyncio.gather(
+            self.open_session_token(), self.open_session_token()
+        )
+        self.assertNotEqual(first, second)
+
+        await self.modern_call("browser_click", {"ref": "@e1"}, session_token=first)
+        await self.modern_call("browser_click", {"ref": "@e2"}, session_token=first)
+        await self.modern_call("browser_click", {"ref": "@e1"}, session_token=second)
+        self.assertEqual(self.browser_owners[0], self.browser_owners[1])
+        self.assertNotEqual(self.browser_owners[0], self.browser_owners[2])
+        self.assertTrue(self.browser_owners[0].startswith("gateway-session-"))
+
+        await self.modern_call(
+            "terminal", {"command": "printf modern"}, session_token=first
+        )
+        self.assertEqual(
+            self.gateway.hermes.call_direct.await_args.kwargs["task_id"],
+            self.browser_owners[0],
+        )
+
+        cleanup = AsyncMock()
+        self.gateway._cleanup_session_owner = cleanup
+        closed = await self.modern_call("session_close", session_token=first)
+        self.assertFalse(closed.is_error)
+        cleanup.assert_awaited_once_with(self.browser_owners[0])
+
+        before = self.gateway.hermes.call.await_count
+        rejected = await self.modern_call(
+            "skill_view", {"name": "hermes-agent"}, session_token=first
+        )
+        self.assertTrue(rejected.is_error)
+        self.assertNotIn(first, rejected.content[0].text)
+        self.assertEqual(self.gateway.hermes.call.await_count, before)
+
+        still_valid = await self.modern_call(
+            "browser_click", {"ref": "@e1"}, session_token=second
+        )
+        self.assertFalse(still_valid.is_error)
+        self.assertEqual(self.browser_owners[-1], self.browser_owners[2])
+        cleanup.assert_awaited_once_with(self.browser_owners[0])
+
+    async def test_expired_capability_fails_closed_on_stateless_call(self):
+        from hermes_mcp_gateway.sessions import SessionCapabilityStore
+
+        now = [100.0]
+        self.gateway.session_capabilities = SessionCapabilityStore(
+            ttl_seconds=5, clock=lambda: now[0]
+        )
+        cleanup = AsyncMock()
+        self.gateway._cleanup_session_owner = cleanup
+        token = await self.open_session_token()
+        now[0] += 5
+        before = self.gateway.hermes.call.await_count
+        result = await self.modern_call(
+            "skill_view", {"name": "hermes-agent"}, session_token=token
+        )
+        self.assertTrue(result.is_error)
+        self.assertNotIn(token, result.content[0].text)
+        self.assertEqual(self.gateway.hermes.call.await_count, before)
+        cleanup.assert_awaited_once()
+
+    async def test_modern_tokens_cannot_cross_process_handle_owners(self):
+        from hermes_mcp_gateway.upstreams import HermesToolsClient
+
+        first, second = await asyncio.gather(
+            self.open_session_token(), self.open_session_token()
+        )
+        first_lease = self.gateway.session_capabilities.acquire(first)
+        second_lease = self.gateway.session_capabilities.acquire(second)
+        first_owner = first_lease.task_id
+        second_owner = second_lease.task_id
+        self.gateway.session_capabilities.release(first_lease)
+        self.gateway.session_capabilities.release(second_lease)
+        self.gateway.hermes.call_direct = HermesToolsClient.call_direct.__get__(
+            self.gateway.hermes
+        )
+        owned = SimpleNamespace(task_id="default", session_key=first_owner)
+        with (
+            patch("tools.process_registry.process_registry.get", return_value=owned),
+            patch(
+                "model_tools.handle_function_call", return_value='{"status":"running"}'
+            ) as dispatch,
+        ):
+            denied = await self.modern_call(
+                "process_manage",
+                {"action": "kill", "session_id": "proc_test_owned"},
+                session_token=second,
+            )
+            self.assertTrue(denied.is_error)
+            dispatch.assert_not_called()
+            accepted = await self.modern_call(
+                "process_manage",
+                {"action": "poll", "session_id": "proc_test_owned"},
+                session_token=first,
+            )
+            self.assertFalse(accepted.is_error)
+            dispatch.assert_called_once()
+        self.assertNotEqual(first_owner, second_owner)
 
     async def test_modern_session_header_cannot_claim_resource_ownership(self):
         result = await self.modern_call(

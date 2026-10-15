@@ -184,8 +184,9 @@ class GatewayPolicyTests(unittest.TestCase):
             + len(MEMORY_TOOLS)
             + 1  # Samchon Graph
             + len(LSP_TOOLS)
-            + 1,  # startup_context
-            40,
+            + 1  # startup_context
+            + 2,  # session_open/session_close
+            42,
         )
 
 
@@ -682,6 +683,42 @@ class WebReadinessProbeTests(unittest.IsolatedAsyncioTestCase):
         gateway._web_probe_at = 0.0
         self.assertTrue(await gateway.refresh_web_tools())
         self.assertEqual(gateway.probe_web_tools.await_count, 2)
+
+    async def test_web_refresh_uses_provider_budget_not_local_health_budget(self):
+        import asyncio
+        from dataclasses import replace
+        from hermes_mcp_gateway.config import GatewayConfig
+        from hermes_mcp_gateway.server import Gateway
+
+        gateway = Gateway(replace(GatewayConfig(), health_timeout_seconds=0.01,
+                                  timeout_seconds=0.5))
+        gateway._web_probe_at = 0.0
+
+        async def provider_probe():
+            await asyncio.sleep(0.04)
+            return True
+
+        gateway.probe_web_tools = AsyncMock(side_effect=provider_probe)
+        self.assertTrue(await gateway.refresh_web_tools())
+        self.assertEqual(gateway.missing_final_tools, set())
+
+    async def test_web_refresh_still_fails_closed_on_provider_deadline(self):
+        import asyncio
+        from dataclasses import replace
+        from hermes_mcp_gateway.config import GatewayConfig
+        from hermes_mcp_gateway.server import Gateway
+
+        gateway = Gateway(replace(GatewayConfig(), health_timeout_seconds=0.01,
+                                  timeout_seconds=0.03))
+        gateway._web_probe_at = 0.0
+
+        async def provider_probe():
+            await asyncio.sleep(1)
+            return True
+
+        gateway.probe_web_tools = AsyncMock(side_effect=provider_probe)
+        self.assertFalse(await gateway.refresh_web_tools())
+        self.assertEqual(gateway.missing_final_tools, set(WEB_TOOLS))
 
     async def test_web_tool_error_invalidates_cached_readiness(self):
         from hermes_mcp_gateway.server import CatalogEntry, Gateway

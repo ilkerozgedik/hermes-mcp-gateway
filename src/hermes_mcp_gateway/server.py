@@ -32,6 +32,13 @@ from .config import (
 from .execution import NativeExecution, execution_schema
 from .lsp import LSPAdapter, lsp_tool_schemas
 from .memory import MemoryAdapter, memory_tool_schemas
+from .sessions import (
+    SESSION_TOKEN_TTL_SECONDS,
+    SessionCapability,
+    SessionCapabilityStore,
+    session_close_tool_schema,
+    session_open_tool_schema,
+)
 from .startup import StartupContext, startup_tool_schema
 from .tool_discovery import BRIDGE_NAMES, PUBLIC_NAMES, ToolDiscovery, public_schemas
 from .upstreams import (
@@ -197,6 +204,8 @@ class Gateway:
         self._deferred_image = False
         self._web_probe_at = time.monotonic()
         self._web_probe_lock = asyncio.Lock()
+        self.session_capabilities = SessionCapabilityStore()
+        self._session_reaper_task: asyncio.Task[None] | None = None
 
     @staticmethod
     def _payload_has_error(value: Any) -> bool:
@@ -239,7 +248,7 @@ class Gateway:
                 asyncio.wait_for(
                     self.hermes.call(
                         "web_extract",
-                        {"urls": ["https://example.com"], "format": "markdown"},
+                        {"urls": ["https://example.com"], "char_limit": 2000},
                     ),
                     timeout=self.config.timeout_seconds,
                 ),
@@ -262,8 +271,11 @@ class Gateway:
             if self._web_probe_fresh():
                 return self.web_tools_ready
             try:
+                # Provider-backed probes need the tool-call budget, not the short
+                # budget used for local listener/discovery health checks. A valid
+                # web request routinely exceeds three seconds.
                 self.web_tools_ready = await asyncio.wait_for(
-                    self.probe_web_tools(), timeout=self.config.health_timeout_seconds
+                    self.probe_web_tools(), timeout=self.config.timeout_seconds
                 )
             except Exception:  # noqa: BLE001 - readiness must fail closed
                 self.web_tools_ready = False
@@ -303,21 +315,89 @@ class Gateway:
             self.catalog = build_catalog(
                 hermes_tools,
                 memory_tool_schemas(),
-                [startup_tool_schema()],
+                [
+                    startup_tool_schema(),
+                    session_open_tool_schema(),
+                    session_close_tool_schema(),
+                ],
                 capability_tools=capability_tool_schemas(),
                 graph_tools=[graph_tool],
                 lsp_tools=lsp_tool_schemas(),
             )
             self.discovery = ToolDiscovery(self.catalog)
+            self._session_reaper_task = asyncio.create_task(
+                self._reap_session_capabilities(),
+                name="gateway-session-capability-reaper",
+            )
         except Exception:
             await self.close()
             raise
 
     async def close(self) -> None:
+        if self._session_reaper_task is not None:
+            self._session_reaper_task.cancel()
+            try:
+                await self._session_reaper_task
+            except asyncio.CancelledError:
+                pass
+            self._session_reaper_task = None
+        await self._cleanup_session_records(self.session_capabilities.revoke_all())
         await self.execution.close()
         await self.hermes.close()
         await self.graph.close()
         await asyncio.to_thread(self.lsp.close)
+
+    async def _cleanup_session_owner(self, task_id: str) -> None:
+        """Clean only resources keyed by this gateway-generated owner ID."""
+        def kill_owned_processes() -> None:
+            from tools.process_registry import process_registry
+
+            process_registry.kill_all(
+                task_id=task_id,
+                source="gateway_session_close",
+                consume_output=True,
+            )
+
+        try:
+            await asyncio.to_thread(kill_owned_processes)
+        except Exception:  # noqa: BLE001 - cleanup must not break revocation
+            logger.warning("Could not clean processes for a gateway session")
+        try:
+            from tools.terminal_tool_lifecycle import cleanup_vm
+
+            await asyncio.to_thread(cleanup_vm, task_id)
+        except Exception:  # noqa: BLE001 - do not retain a revoked owner's cwd/env
+            logger.warning("Could not clean a gateway-owned terminal environment")
+        try:
+            from .upstreams import _reset_camofox_session
+
+            await asyncio.to_thread(_reset_camofox_session, task_id)
+        except Exception:  # noqa: BLE001 - local browser binding cleanup is best effort
+            logger.warning("Could not drop a gateway-owned browser binding")
+
+    async def _cleanup_session_records(
+        self, records: list[SessionCapability]
+    ) -> None:
+        for record in records:
+            await self._cleanup_session_owner(record.task_id)
+
+    async def _reap_session_capabilities(self) -> None:
+        while True:
+            await asyncio.sleep(min(30, SESSION_TOKEN_TTL_SECONDS))
+            await self._cleanup_session_records(self.session_capabilities.expire_due())
+
+    async def acquire_session_token(
+        self, token: object
+    ) -> SessionCapability | None:
+        # Do not acquire a lease before an await: cancellation while cleaning
+        # expired owners would otherwise strand the newly acquired reference.
+        await self._cleanup_session_records(self.session_capabilities.expire_due())
+        return self.session_capabilities.acquire(token)
+
+    async def release_session_token(self, lease: SessionCapability) -> None:
+        cleanup = self.session_capabilities.release(lease)
+        if cleanup is not None:
+            await self._cleanup_session_records([cleanup])
 
     async def call(
         self,
@@ -325,6 +405,7 @@ class Gateway:
         arguments: dict[str, Any],
         *,
         task_id: str | None = None,
+        session_capability: SessionCapability | None = None,
         via_bridge: bool = False,
     ) -> types.CallToolResult:
         if name in BRIDGE_NAMES:
@@ -340,7 +421,11 @@ class Gateway:
                 else:
                     target, params = self.discovery.validate_call(arguments)
                     return await self.call(
-                        target, params, task_id=task_id, via_bridge=True
+                        target,
+                        params,
+                        task_id=task_id,
+                        session_capability=session_capability,
+                        via_bridge=True,
                     )
                 return normalize_result(
                     types.CallToolResult(
@@ -362,7 +447,9 @@ class Gateway:
         if name in STATEFUL_HERMES_TOOLS and not task_id:
             return error_result(
                 "MCP session identity is required for stateful browser/process tools. "
-                "Use a stateful MCP client; independent commands can use execute_code.",
+                "On modern sessionless MCP, discover and call session_open, then pass "
+                "its session_token at the top level of each tool_call. Legacy stateful "
+                "clients may use their SDK session; independent commands can use execute_code.",
                 limit=self.config.max_text_chars,
             )
         try:
@@ -414,6 +501,47 @@ class Gateway:
                             limit=self.config.max_text_chars,
                         )
                     payload = await asyncio.to_thread(self.startup.read)
+                elif name == "session_open":
+                    if arguments:
+                        return error_result(
+                            "session_open does not accept arguments",
+                            limit=self.config.max_text_chars,
+                        )
+                    expired = self.session_capabilities.expire_due()
+                    await self._cleanup_session_records(expired)
+                    try:
+                        token, _record = self.session_capabilities.issue()
+                    except RuntimeError as exc:
+                        return error_result(
+                            str(exc), limit=self.config.max_text_chars
+                        )
+                    # This is the one intentional credential-bearing response.
+                    # Do not run it through output redaction or log its contents.
+                    return types.CallToolResult(
+                        content=[
+                            types.TextContent(
+                                text=json.dumps(
+                                    {
+                                        "session_token": token,
+                                        "expires_in_seconds": SESSION_TOKEN_TTL_SECONDS,
+                                    }
+                                )
+                            )
+                        ]
+                    )
+                elif name == "session_close":
+                    if arguments:
+                        return error_result(
+                            "session_close does not accept arguments",
+                            limit=self.config.max_text_chars,
+                        )
+                    if session_capability is None:
+                        return error_result(
+                            "session_close requires a valid session_token",
+                            limit=self.config.max_text_chars,
+                        )
+                    self.session_capabilities.revoke(session_capability)
+                    payload = {"closed": True}
                 else:
                     raise ValueError(f"unsupported gateway tool: {name}")
                 result = types.CallToolResult(
@@ -525,15 +653,43 @@ def create_app(config: GatewayConfig | None = None):
                 f"Unknown or disallowed tool: {params.name}",
                 limit=gateway.config.max_text_chars,
             )
-        task_id = browser_task_id(_ctx) if params.name == "tool_call" else None
-        return await gateway.call(params.name, params.arguments or {}, task_id=task_id)
+        arguments = params.arguments or {}
+        if params.name != "tool_call":
+            return await gateway.call(params.name, arguments)
+
+        arguments = dict(arguments)
+        token_present = "session_token" in arguments
+        token = arguments.pop("session_token", None)
+        lease = None
+        if token_present:
+            lease = await gateway.acquire_session_token(token)
+            if lease is None:
+                return error_result(
+                    "Invalid or expired session token",
+                    limit=gateway.config.max_text_chars,
+                )
+        task_id = lease.task_id if lease is not None else browser_task_id(_ctx)
+        try:
+            return await gateway.call(
+                params.name,
+                arguments,
+                task_id=task_id,
+                session_capability=lease,
+            )
+        finally:
+            if lease is not None:
+                await gateway.release_session_token(lease)
 
     server = Server(
         "hermes-mcp-gateway",
         version="0.1.0",
         instructions=(
             "Single default-deny MCP gateway for native execution, curated Hermes "
-            "tools, cwd-scoped Samchon Graph semantics, guarded Hermes capabilities, and Honcho memory."
+            "tools, cwd-scoped Samchon Graph semantics, guarded Hermes capabilities, and Honcho memory. "
+            "Use tool_search, tool_describe, then tool_call for deferred tools. For browser, "
+            "terminal and process continuity on modern sessionless MCP, discover and call "
+            "session_open once, pass its returned session_token at the top level of every "
+            "related tool_call, and use session_close when finished."
         ),
         lifespan=lifespan,
         on_list_tools=list_tools,

@@ -69,7 +69,9 @@ def bridge_schemas() -> list[types.Tool]:
             description=(
                 "Run exactly one tool discovered via tool_search/tool_describe, with the "
                 "arguments specified by its schema. Existing Gateway permissions, approvals, "
-                "session isolation, output filtering and no-retry policy still apply."
+                "session isolation, output filtering and no-retry policy still apply. "
+                "Modern browser/terminal/process calls need a session_token: discover "
+                "and call session_open once, then pass its token here until session_close."
             ),
             input_schema={
                 "type": "object",
@@ -87,7 +89,18 @@ def bridge_schemas() -> list[types.Tool]:
                             "required": ["name", "arguments"],
                             "additionalProperties": False,
                         },
-                    }
+                    },
+                    "session_token": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 128,
+                        "description": (
+                            "Optional session capability returned by session_open. Pass "
+                            "the exact token on each call that should share browser, "
+                            "terminal, and process state. Required for stateful tools "
+                            "on modern sessionless MCP transports."
+                        ),
+                    },
                 },
                 "required": ["calls"],
                 "additionalProperties": False,
