@@ -550,6 +550,12 @@ def create_app(config: GatewayConfig | None = None):
             payload, status_code=200 if payload["status"] == "ok" else 503
         )
 
+    async def oauth_protected_resource(_request: Request):
+        return JSONResponse(
+            {"error": "not_supported", "error_description": "OAuth not configured"},
+            status_code=404,
+        )
+
     return server.streamable_http_app(
         streamable_http_path="/mcp",
         # MCP 2.0's modern JSON-only path does not watch HTTP disconnects.
@@ -557,7 +563,12 @@ def create_app(config: GatewayConfig | None = None):
         json_response=False,
         stateless_http=False,
         host=gateway.config.host,
-        custom_starlette_routes=[Route("/healthz", healthz), Route("/readyz", readyz)],
+        custom_starlette_routes=[
+            Route("/healthz", healthz),
+            Route("/readyz", readyz),
+            Route("/.well-known/oauth-protected-resource", oauth_protected_resource),
+            Route("/.well-known/oauth-protected-resource/mcp", oauth_protected_resource),
+        ],
     )
 
 

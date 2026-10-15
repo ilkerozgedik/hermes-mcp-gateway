@@ -657,6 +657,17 @@ class WebReadinessProbeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn(b'"status":"ok"', response.body)
 
+    async def test_oauth_protected_resource_returns_json_404(self):
+        from hermes_mcp_gateway.server import create_app
+
+        app = create_app()
+        for path in ("/.well-known/oauth-protected-resource", "/.well-known/oauth-protected-resource/mcp"):
+            route = next(route for route in app.routes if getattr(route, 'path', None) == path)
+            response = await route.endpoint(None)
+            self.assertEqual(response.status_code, 404)
+            self.assertEqual(response.headers.get("content-type"), "application/json")
+            self.assertIn(b'"not_supported"', response.body)
+
     async def test_cached_web_probe_recovers_after_expiry(self):
         from hermes_mcp_gateway.server import Gateway
 
