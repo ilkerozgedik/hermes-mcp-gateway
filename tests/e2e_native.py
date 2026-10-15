@@ -76,10 +76,10 @@ async def main():
         assert not described.get("isError"), text(described)
         assert "execute_code" in text(described), text(described)
         report["checks"]["execute_code_schema"] = text(described)
-        denied = await call(client, "execute_code", {"code": "raise RuntimeError('must not run')"})
+        denied = await call(client, "execute_code", {"code": "raise RuntimeError('must not run')", "confirmed": True})
         assert denied.get("isError"), denied
-        report["checks"]["missing_confirmation_denied"] = True
-        hidden = await rpc(client, "tools/call", {"name": "execute_code", "arguments": {"code": "print('forbidden')", "confirmed": True}})
+        report["checks"]["legacy_confirmation_rejected"] = True
+        hidden = await rpc(client, "tools/call", {"name": "execute_code", "arguments": {"code": "print('forbidden')"}})
         assert hidden.get("isError"), hidden
         report["checks"]["hidden_direct_call_denied"] = True
         code = (
@@ -90,7 +90,7 @@ async def main():
             "t = terminal('printf gateway-native-rpc-ok')\n"
             "print(json.dumps({'read':r,'search':s,'terminal':t}))\n"
         )
-        executed = await call(client, "execute_code", {"code": code, "confirmed": True})
+        executed = await call(client, "execute_code", {"code": code})
         assert not executed.get("isError"), text(executed)
         payload = json.loads(text(executed))
         assert payload.get("status") == "success", payload
@@ -101,9 +101,9 @@ async def main():
         assert "gateway-native-rpc-ok" in data["terminal"].get("output", ""), data
         report["checks"]["native_rpc"] = payload
         marker = "secret_" + uuid.uuid4().hex
-        first = await call(client, "execute_code", {"code": f"{marker} = 'private'; print('created')", "confirmed": True})
+        first = await call(client, "execute_code", {"code": f"{marker} = 'private'; print('created')"})
         assert not first.get("isError"), text(first)
-        second = await call(client, "execute_code", {"code": f"print({marker!r} in globals())", "confirmed": True})
+        second = await call(client, "execute_code", {"code": f"print({marker!r} in globals())"})
         assert not second.get("isError"), text(second)
         assert json.loads(text(second))["output"].strip() == "False", text(second)
         report["checks"]["request_state_isolation"] = True
@@ -130,7 +130,7 @@ async def main():
                 f"Path({str(pidfile)!r}).write_text(json.dumps({{'kernel':os.getpid(),'descendant':p.pid}}))\n"
                 "time.sleep(120)\n"
             )
-            request = asyncio.create_task(call(client, "execute_code", {"code": code, "confirmed": True}))
+            request = asyncio.create_task(call(client, "execute_code", {"code": code}))
             try:
                 deadline = time.monotonic() + 30
                 while not pidfile.exists() and time.monotonic() < deadline:

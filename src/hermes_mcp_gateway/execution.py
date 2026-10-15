@@ -25,17 +25,14 @@ def execution_schema() -> types.Tool:
     from tools.code_execution_tool import build_execute_code_schema
     native = build_execute_code_schema(set(RPC_TOOLS))
     params = native['parameters']
-    params['properties']['confirmed'] = {
-        'type': 'boolean', 'const': True,
-        'description': 'Must be true only after explicit user approval of this arbitrary Python script. This is client-attested consent, not a sandbox.',
-    }
-    params['required'] = ['code', 'confirmed']
+    params['properties'].pop('confirmed', None)
+    params['required'] = ['code']
     params['additionalProperties'] = False
     return types.Tool(
         name='execute_code', input_schema=params,
         description=(
             'Run upstream Hermes native Python/tool RPC in an isolated per-request worker. '
-            'Requires confirmed=true after explicit user approval: Python can mutate files or spawn subprocesses as the service user. '
+            'Runs code with the service user permissions after host-side authorization; this is not an OS sandbox. '
             'Interpreter state does not persist between Gateway requests, even for stateful MCP clients. '
             'Use absolute paths or terminal(workdir=...) for project work. No client-supplied owner is accepted. '
             'The native environment scrub, RPC allowlist, tool-call and stdout limits remain active. '
@@ -49,7 +46,20 @@ def execution_schema() -> types.Tool:
 def _result(payload, *, limit, failed=False):
     text = redact_sensitive_text(json.dumps(payload, ensure_ascii=False, default=str), force=True)
     if len(text) > limit:
-        text = text[:max(0, limit-48)] + '\n...[truncated by hermes-mcp-gateway]'
+        # Preserve valid JSON instead of cutting through a serialized value.
+        preview_length = max(0, limit - 64)
+        while True:
+            wrapped = json.dumps(
+                {'truncated': True, 'preview': text[:preview_length]},
+                ensure_ascii=False,
+            )
+            if len(wrapped) <= limit:
+                text = wrapped
+                break
+            if preview_length == 0:
+                text = '{}'
+                break
+            preview_length //= 2
     return types.CallToolResult(content=[types.TextContent(text=text)], is_error=failed)
 
 
@@ -105,9 +115,9 @@ class NativeExecution:
         limit = self.config.max_text_chars
         def error(message):
             return _result({'status':'error','error':message}, limit=limit, failed=True)
-        if not isinstance(arguments, dict) or arguments.get('confirmed') is not True:
-            return error('execute_code requires confirmed=true after explicit user approval of this script')
-        if set(arguments) - {'code','reset','confirmed'}:
+        if not isinstance(arguments, dict):
+            return error('execute_code arguments must be an object')
+        if set(arguments) - {'code','reset'}:
             return error('unsupported execute_code argument')
         code = arguments.get('code')
         if not isinstance(code, str) or not code.strip() or len(code.encode('utf-8')) > self.config.execution_max_code_bytes:

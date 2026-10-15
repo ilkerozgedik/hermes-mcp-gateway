@@ -8,13 +8,13 @@ Single localhost-only MCP endpoint that aggregates native Hermes execution, a st
 - Process health: `http://127.0.0.1:3060/healthz`
 - Final-cutover readiness: `http://127.0.0.1:3060/readyz`
 
-`healthz` is a local liveness check that never calls providers. `readyz` requires the curated native tools, web provider, Samchon Graph, LSP adapter, guarded capabilities, Honcho and startup files. The catalog is frozen until restart. Modern MCP `2026-07-28` HTTP is sessionless: `execute_code` uses an independent server-generated owner per request. Browser, direct `terminal` and `process_manage` require a validated legacy SDK session or a gateway-issued `session_token`; raw client headers and caller-provided owner IDs never grant ownership. Modern clients should discover `session_open`, call it once, and pass its returned token as the top-level `tool_call.session_token` on calls that need browser/terminal/process continuity. Tokens are random, revocable, expire after 15 minutes, and are capped at 256 active capabilities. `session_close` revokes the capability, kills only its owner's native processes, and drops only its local browser binding. Independent shell pipelines can use confirmed `execute_code` with `hermes_tools.terminal`.
+`healthz` is a local liveness check that never calls providers. `readyz` requires the curated native tools, web provider, Samchon Graph, LSP adapter, guarded capabilities, Honcho and startup files. The catalog is frozen until restart. Modern MCP `2026-07-28` HTTP is sessionless: `execute_code` uses an independent server-generated owner per request. Browser, direct `terminal` and `process_manage` require a validated legacy SDK session or a gateway-issued `session_token`; raw client headers and caller-provided owner IDs never grant ownership. Modern clients should discover `session_open`, call it once, and pass its returned token as the top-level `tool_call.session_token` on calls that need browser/terminal/process continuity. Tokens are random, revocable, expire after 15 minutes, and are capped at 256 active capabilities. `session_close` revokes the capability, kills only its owner's native processes, and drops only its local browser binding. Independent shell pipelines can use `execute_code` with `hermes_tools.terminal` without a separate Gateway confirmation parameter.
 
 ## Tool policy
 
 Native direct tools bind Hermes' existing session ContextVars inside the request worker, so terminal cwd/environment and process ownership remain client-scoped. Per-call hook IDs are independently generated; they distinguish concurrent executions without granting resource ownership or weakening approval hooks.
 
-HTTP disconnects/timeouts kill and reap native execution worker trees, including tracked descendants in separate process groups. The Gateway never retries execution. Other thread-backed native tools retain best-effort cancellation: cancellation is not rollback. Arbitrary confirmed Python has the service user's privileges; this is not an OS sandbox.
+HTTP disconnects/timeouts kill and reap native execution worker trees, including tracked descendants in separate process groups. The Gateway never retries execution. Other thread-backed native tools retain best-effort cancellation: cancellation is not rollback. Arbitrary Python has the service user's privileges; this is not an OS sandbox.
 
 `tools/list` exposes only six tools: `tool_search`, `tool_describe`, `tool_call`, `startup_context`, `memory_context`, and `skills_list`. Deferred tools are available only through the validated one-call discovery bridge. Search uses Hermes native BM25 over the frozen catalog; descriptions expose authoritative input schemas.
 
@@ -36,8 +36,8 @@ Samchon Graph is exposed as one `inspect_code_graph` tool. The caller supplies a
 Guarded Hermes capabilities are:
 
 - `session_search` — read-only search over the local Hermes session database. Cross-profile override is intentionally unavailable; results are historical conversation context, not proof of current external state.
-- `delegate_task` — synchronous leaf delegation, one or two children, with `confirmed=true` after explicit user approval. Children inherit `web`, `vision`, `skills`, `file`, `terminal`, and `code_execution` native toolsets. Recursive delegation is unavailable; native child session/security policies apply.
-- `cronjob` — read-only `list`, plus guarded `create`, `update`, `pause`, `resume`, `remove`, and `run`. Mutations require `confirmed=true`. Model/provider/base-URL overrides and script/no-agent/monitor execution fields are not exposed; delivery defaults to `local`.
+- `delegate_task` — synchronous leaf delegation, one or two children, subject to host-side permission controls. Children inherit `web`, `vision`, `skills`, `file`, `terminal`, and `code_execution` native toolsets. Recursive delegation is unavailable; native child session/security policies apply.
+- `cronjob` — read-only `list`, plus guarded `create`, `update`, `pause`, `resume`, `remove`, and `run`. Mutations use host-side permission controls. Model/provider/base-URL overrides and script/no-agent/monitor execution fields are not exposed; delivery defaults to `local`.
 
 The catalog exposes exactly six public tools. Native Git worktrees replace the retired coordinator; no optional coordinator service is needed. No tools are dynamically added to the catalog during a session; a Gateway restart refreshes discovery. A new ChatGPT MCP connection may be required to refresh the public schemas.
 
@@ -55,11 +55,11 @@ Memory tools are:
 
 Memory identity is resolved through Hermes Honcho configuration. The existing `workspace=hermes` and user peer are preserved; only this adapter's assistant peer is `chatgpt`. Conclusion writes require a durable kind (`preference`, `decision`, `architecture`, `project_state`) and reject secret-like or explicitly temporary content. List/delete operations retain Honcho semantics.
 
-## Native execution consent and limits
+## Native execution limits
 
-Discover and describe `execute_code`, then call it through `tool_call` with `code` and exact boolean `confirmed=true` only after explicit user approval of that script. This flag is client-attested consent, not a trusted UI or authorization boundary. Transport access remains restricted to loopback and the authenticated Tunnel Client.
+Discover and describe `execute_code`, then call it through `tool_call` with `code`. The Gateway does not require a redundant client-supplied confirmation flag: user consent is handled by the ChatGPT host. This is not authorization proof at the MCP transport; access remains restricted to loopback and the authenticated Tunnel Client. The Gateway's allowlists, owner isolation, and resource limits remain in force.
 
-Every call invokes unmodified upstream Hermes `execute_code` inside a new Linux worker. A child subreaper keeps double-forked descendants owned until cleanup. Interpreter state **does not persist** between Gateway requests; `reset` is accepted for native schema compatibility but each worker already starts fresh. The native whole-script approval guard runs in a request-bound context; the callback grants only the already-confirmed script once, and denies further approval requests. No session/always/YOLO grant is installed. Existing operator approval configuration still applies.
+Every call invokes unmodified upstream Hermes `execute_code` inside a new Linux worker. A child subreaper keeps double-forked descendants owned until cleanup. Interpreter state **does not persist** between Gateway requests; `reset` is accepted for native schema compatibility but each worker already starts fresh. The native whole-script approval guard runs in a request-bound context; the callback grants only the dispatched script once, and denies further approval requests. No session/always/YOLO grant is installed. Existing operator approval configuration still applies.
 
 Limits: 64 KiB UTF-8 code, two concurrent workers, 300-second total deadline including queue wait, 1 MiB per worker stdout/stderr transport stream, and 65,536-character redacted Gateway output. Native defaults additionally cap tool calls at 50 and stdout at 50 KiB; configured native limits can be stricter. Child environment scrubbing and the explicit native RPC allowlist remain active. Only `read_file`, `write_file`, `search_files`, `patch`, foreground `terminal`, `web_search`, and `web_extract` are granted over RPC. Direct Python imports/subprocesses are not restricted by that allowlist and can access user files; execution is not a security jail. Context Mode indexing/search is intentionally not emulated.
 
@@ -93,7 +93,7 @@ PYTHONPATH=src:/srv/agents/src/hermes-agent \
 
 Local integration gates before tunnel cutover:
 
-1. Modern sessionless HTTP `execute_code` smoke: missing confirmation denied, confirmed native file/search/terminal RPC succeeds, requests do not share state, cancellation kills native descendants.
+1. Modern sessionless HTTP `execute_code` smoke: no confirmation field required, native file/search/terminal RPC succeeds, requests do not share state, cancellation kills native descendants.
 2. `vision_analyze`, `skills_list`, native file/terminal/`process_manage` tools, `image_generate`, `video_analyze`, and the exact 10 Camofox-compatible `browser_*` tools; explicit absence of `computer_use`, `browser_exec`, and `browser_cdp`.
 3. Guarded capability checks: real `session_search`, read-only `cronjob list`, and scoped delegation-tool policy; one small delegated child smoke when resource headroom permits.
 4. Honcho profile/context/search and controlled `memory_conclude` create/readback/delete.

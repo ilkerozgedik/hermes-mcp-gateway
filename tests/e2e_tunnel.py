@@ -74,7 +74,6 @@ async def exercise(url: str, report: dict) -> None:
         report["checks"]["modern_native_file"] = True
         executed = await call("execute_code", {
             "code": "from hermes_tools import terminal\nprint(terminal('printf tunnel-native-ok'))",
-            "confirmed": True,
         })
         assert json.loads(text(executed)).get("status") == "success", text(executed)
         assert "tunnel-native-ok" in text(executed)

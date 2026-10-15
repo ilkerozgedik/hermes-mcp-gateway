@@ -9,7 +9,7 @@ from dataclasses import replace
 import psutil
 
 from hermes_mcp_gateway.config import GatewayConfig
-from hermes_mcp_gateway.execution import NativeExecution, execution_schema
+from hermes_mcp_gateway.execution import NativeExecution, _result, execution_schema
 
 
 class ExecutionTests(unittest.IsolatedAsyncioTestCase):
@@ -20,24 +20,25 @@ class ExecutionTests(unittest.IsolatedAsyncioTestCase):
         await self.executor.close()
 
     async def run_code(self, code, **kwargs):
-        result = await self.executor.call({'code': code, 'confirmed': True, **kwargs})
+        result = await self.executor.call({'code': code, **kwargs})
         return result, json.loads(result.content[0].text)
 
-    def test_schema_is_truthful_and_requires_confirmation(self):
+    def test_schema_is_truthful_without_redundant_confirmation(self):
         schema = execution_schema()
-        self.assertIn('confirmed', schema.input_schema['required'])
+        self.assertIn('code', schema.input_schema['required'])
+        self.assertNotIn('confirmed', schema.input_schema['properties'])
         self.assertIn('not persist', schema.description)
         self.assertFalse(schema.input_schema['additionalProperties'])
 
-    async def test_confirmation_fails_closed(self):
-        for confirmed in [None, False, 1, 'true']:
+    async def test_legacy_confirmation_argument_is_rejected(self):
+        for confirmed in [None, False, True]:
             result = await self.executor.call({'code': "raise RuntimeError('not run')", 'confirmed': confirmed})
             self.assertTrue(result.is_error)
         self.assertEqual(len(self.executor._active), 0)
 
     async def test_invalid_arguments_fail_closed(self):
         for args in [{}, {'code': ''}, {'code': 4}, {'code': 'print(1)', 'task_id': 'forged'}]:
-            self.assertTrue((await self.executor.call({**args, 'confirmed': True})).is_error)
+            self.assertTrue((await self.executor.call({**args})).is_error)
 
     async def test_real_native_execution_rpc_and_env_scrubbing(self):
         with tempfile.TemporaryDirectory() as root:
@@ -67,7 +68,7 @@ print(json.dumps({{'r':r,'s':s,'t':t,'secret':os.getenv('MIGRATION_SECRET_TOKEN'
         self.assertEqual(payload['output'].strip(), 'escaped-ok')
 
     async def test_code_byte_budget_rejects_before_spawn(self):
-        result = await self.executor.call({'code': '#' + 'ş' * 40000, 'confirmed': True})
+        result = await self.executor.call({'code': '#' + 'ş' * 40000})
         self.assertTrue(result.is_error)
         self.assertFalse(self.executor._active)
 
@@ -83,14 +84,19 @@ print(json.dumps({{'r':r,'s':s,'t':t,'secret':os.getenv('MIGRATION_SECRET_TOKEN'
         self.assertTrue(result.is_error, payload)
 
     async def test_output_is_bounded(self):
-        result = await self.executor.call({'code': "print('x'*200000)", 'confirmed': True})
+        result = await self.executor.call({'code': "print('x'*200000)"})
         self.assertLessEqual(sum(len(x.text) for x in result.content), GatewayConfig().max_text_chars)
-        self.assertIn('truncat', result.content[0].text)
+        json.loads(result.content[0].text)
+        bounded = _result({'output': 'x' * 10000}, limit=220)
+        self.assertLessEqual(len(bounded.content[0].text), 220)
+        payload = json.loads(bounded.content[0].text)
+        self.assertTrue(payload['truncated'])
+        self.assertIn('preview', payload)
 
     async def test_timeout_kills_native_tree(self):
         executor = NativeExecution(replace(GatewayConfig(), execution_timeout_seconds=1.0))
         try:
-            result = await executor.call({'code': 'import time; time.sleep(60)', 'confirmed': True})
+            result = await executor.call({'code': 'import time; time.sleep(60)'})
             self.assertTrue(result.is_error)
             self.assertIn('timeout', result.content[0].text.lower())
             self.assertEqual(len(executor._active), 0)
@@ -106,7 +112,7 @@ print(json.dumps({{'r':r,'s':s,'t':t,'secret':os.getenv('MIGRATION_SECRET_TOKEN'
             await release.wait()
             return await original(*args, **kwargs)
         with patch('hermes_mcp_gateway.execution.asyncio.create_subprocess_exec', delayed):
-            request = asyncio.create_task(self.executor.call({'code': "print('must not execute')", 'confirmed': True}))
+            request = asyncio.create_task(self.executor.call({'code': "print('must not execute')"}))
             closing = None
             try:
                 await asyncio.wait_for(started.wait(), 3)
@@ -122,7 +128,6 @@ print(json.dumps({{'r':r,'s':s,'t':t,'secret':os.getenv('MIGRATION_SECRET_TOKEN'
                 await asyncio.gather(request, *([closing] if closing else []), return_exceptions=True)
 
     async def test_normal_completion_reaps_orphaned_grandchild(self):
-        import sys
         with tempfile.TemporaryDirectory() as root:
             pidfile = Path(root) / 'orphan.pid'
             child = "import subprocess; from pathlib import Path; p=subprocess.Popen(['sleep','60'],start_new_session=True); Path(" + repr(str(pidfile)) + ").write_text(str(p.pid))"
@@ -147,7 +152,7 @@ from pathlib import Path
 p=subprocess.Popen(['sleep','60'],start_new_session=True)
 Path({str(pidfile)!r}).write_text(json.dumps([os.getpid(),p.pid]))
 time.sleep(60)'''
-            task = asyncio.create_task(self.executor.call({'code': code, 'confirmed': True}))
+            task = asyncio.create_task(self.executor.call({'code': code}))
             try:
                 for _ in range(300):
                     if pidfile.exists() or task.done():

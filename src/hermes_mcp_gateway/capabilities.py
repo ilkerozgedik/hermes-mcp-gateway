@@ -38,11 +38,9 @@ _CRON_ALLOWED = frozenset(
         "continuity",
         "workdir",
         "attach_to_session",
-        "confirmed",
     }
 )
-_CRON_MUTATIONS = frozenset({"create", "update", "pause", "resume", "remove", "run"})
-_DELEGATE_ALLOWED = frozenset({"goal", "context", "tasks", "confirmed"})
+_DELEGATE_ALLOWED = frozenset({"goal", "context", "tasks"})
 _SAFE_DELEGATION_TOOLSETS = ["web", "vision", "skills", "file", "terminal", "code_execution"]
 
 
@@ -104,7 +102,7 @@ def capability_tool_schemas() -> list[types.Tool]:
             name="delegate_task",
             description=(
                 "Run one or two Hermes leaf subagents synchronously in isolated contexts. "
-                "Spawning costs model inference and requires confirmed=true. Children may use "
+                "Spawning costs model inference. Children may use "
                 "web, vision, skills, and native file/terminal/code tools; "
                 "recursive delegation is not exposed."
             ),
@@ -127,13 +125,6 @@ def capability_tool_schemas() -> list[types.Tool]:
                             "additionalProperties": False,
                         },
                     },
-                    "confirmed": {
-                        "type": "boolean",
-                        "description": (
-                            "Must be true after explicit user approval because "
-                            "delegation consumes model inference."
-                        ),
-                    },
                 },
                 "additionalProperties": False,
             },
@@ -142,7 +133,7 @@ def capability_tool_schemas() -> list[types.Tool]:
             name="cronjob",
             description=(
                 "Manage Hermes scheduled jobs. list is read-only. create/update/pause/resume/remove/run "
-                "are state-changing and require confirmed=true. Unsafe script/provider/model routing "
+                "are state-changing. Unsafe script/provider/model routing "
                 "parameters are intentionally unavailable. Delivery defaults to local."
             ),
             input_schema={
@@ -170,13 +161,6 @@ def capability_tool_schemas() -> list[types.Tool]:
                     "continuity": {"type": "boolean"},
                     "workdir": {"type": "string"},
                     "attach_to_session": {"type": "boolean"},
-                    "confirmed": {
-                        "type": "boolean",
-                        "description": (
-                            "Must be true for create/update/pause/resume/remove/run "
-                            "after explicit user approval."
-                        ),
-                    },
                 },
                 "required": ["action"],
             },
@@ -278,9 +262,6 @@ class HermesCapabilities:
     async def _delegate_task(self, arguments: dict[str, Any]) -> types.CallToolResult:
         if rejected := _reject_unknown(arguments, _DELEGATE_ALLOWED):
             return rejected
-        if arguments.get("confirmed") is not True:
-            return _error("delegate_task requires confirmed=true after explicit user approval")
-
         goal = arguments.get("goal")
         tasks = arguments.get("tasks")
         if bool(goal) == bool(tasks):
@@ -320,11 +301,6 @@ class HermesCapabilities:
         if rejected := _reject_unknown(arguments, _CRON_ALLOWED):
             return rejected
         action = str(arguments.get("action") or "").strip().lower()
-        if action in _CRON_MUTATIONS and arguments.get("confirmed") is not True:
-            return _error(
-                f"cronjob action '{action}' requires confirmed=true after "
-                "explicit user approval"
-            )
         payload = await asyncio.to_thread(
             cronjob,
             action=action,

@@ -60,17 +60,23 @@ class CronCapabilityTests(unittest.IsolatedAsyncioTestCase):
             "monitor_script", "monitor_url", "enabled_toolsets",
         }:
             self.assertNotIn(forbidden, props)
-        self.assertIn("confirmed", props)
+        self.assertNotIn("confirmed", props)
 
-    async def test_cron_mutation_requires_explicit_confirmation(self):
+    async def test_cron_mutation_without_redundant_confirmation(self):
         capabilities = HermesCapabilities()
-        with patch("hermes_mcp_gateway.capabilities.cronjob") as cron:
+        with patch("hermes_mcp_gateway.capabilities.cronjob", return_value=json.dumps({"success": True})) as cron:
             result = await capabilities.call(
                 "cronjob",
                 {"action": "create", "schedule": "0 9 * * *", "prompt": "daily summary"},
             )
+        self.assertFalse(result.is_error)
+        cron.assert_called_once()
+
+    async def test_cron_legacy_confirmation_is_not_a_supported_argument(self):
+        capabilities = HermesCapabilities()
+        with patch('hermes_mcp_gateway.capabilities.cronjob') as cron:
+            result = await capabilities.call('cronjob', {'action': 'create', 'confirmed': True})
         self.assertTrue(result.is_error)
-        self.assertIn("confirmed", result.content[0].text)
         cron.assert_not_called()
 
     async def test_cron_create_defaults_to_local_delivery_and_forwards_safe_fields(self):
@@ -86,7 +92,6 @@ class CronCapabilityTests(unittest.IsolatedAsyncioTestCase):
                     "schedule": "0 9 * * *",
                     "prompt": "daily summary",
                     "name": "summary",
-                    "confirmed": True,
                 },
             )
         self.assertFalse(result.is_error)
@@ -116,7 +121,6 @@ class CronCapabilityTests(unittest.IsolatedAsyncioTestCase):
                 "schedule": "1h",
                 "prompt": "x",
                 "script": "/tmp/x",
-                "confirmed": True,
             },
         )
         self.assertTrue(result.is_error)
@@ -131,14 +135,20 @@ class DelegationCapabilityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(props["tasks"]["maxItems"], 2)
         for forbidden in {"background", "role", "max_iterations", "action", "subagent_id"}:
             self.assertNotIn(forbidden, props)
-        self.assertIn("confirmed", props)
+        self.assertNotIn("confirmed", props)
 
-    async def test_delegate_requires_confirmation_before_spawning(self):
+    async def test_delegate_without_redundant_confirmation(self):
         capabilities = HermesCapabilities()
-        with patch("hermes_mcp_gateway.capabilities.delegate_task") as delegate:
+        with patch("hermes_mcp_gateway.capabilities._build_delegation_parent", return_value=MagicMock()), patch("hermes_mcp_gateway.capabilities.delegate_task", return_value=json.dumps({"success": True})) as delegate:
             result = await capabilities.call("delegate_task", {"goal": "Research auth design"})
+        self.assertFalse(result.is_error)
+        delegate.assert_called_once()
+
+    async def test_delegate_legacy_confirmation_is_not_a_supported_argument(self):
+        capabilities = HermesCapabilities()
+        with patch('hermes_mcp_gateway.capabilities.delegate_task') as delegate:
+            result = await capabilities.call('delegate_task', {'goal': 'Research auth design', 'confirmed': True})
         self.assertTrue(result.is_error)
-        self.assertIn("confirmed", result.content[0].text)
         delegate.assert_not_called()
 
     async def test_delegate_runs_synchronously_as_leaf_and_closes_parent(self):
@@ -156,7 +166,6 @@ class DelegationCapabilityTests(unittest.IsolatedAsyncioTestCase):
                 {
                     "goal": "Research auth design",
                     "context": "Read-only research",
-                    "confirmed": True,
                 },
             )
         self.assertFalse(result.is_error)
@@ -173,14 +182,14 @@ class DelegationCapabilityTests(unittest.IsolatedAsyncioTestCase):
     async def test_delegate_rejects_more_than_two_batch_tasks(self):
         capabilities = HermesCapabilities()
         tasks = [{"goal": f"Task {i} with enough detail"} for i in range(3)]
-        result = await capabilities.call("delegate_task", {"tasks": tasks, "confirmed": True})
+        result = await capabilities.call("delegate_task", {"tasks": tasks})
         self.assertTrue(result.is_error)
         self.assertIn("2", result.content[0].text)
 
     async def test_delegate_rejects_background_override(self):
         capabilities = HermesCapabilities()
         result = await capabilities.call(
-            "delegate_task", {"goal": "Research auth design", "background": True, "confirmed": True}
+            "delegate_task", {"goal": "Research auth design", "background": True}
         )
         self.assertTrue(result.is_error)
         self.assertIn("background", result.content[0].text)

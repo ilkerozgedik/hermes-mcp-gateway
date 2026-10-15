@@ -63,8 +63,8 @@ def main():
         consumed = False
         def approve(command, description, **kwargs):
             nonlocal consumed
-            # Client-attested confirmation grants only this already-described
-            # script once, never a session/always grant or another nested action.
+            # Grant only the exact dispatched script once, never another nested
+            # approval or a session-wide grant. Host permissions stay upstream.
             if not consumed and command == expected and description.startswith('execute_code script execution.'):
                 consumed = True
                 return 'once'
