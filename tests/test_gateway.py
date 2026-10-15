@@ -17,7 +17,6 @@ from hermes_mcp_gateway.config import (
 from hermes_mcp_gateway.lsp import LSP_TOOLS, lsp_tool_schemas
 from hermes_mcp_gateway.server import build_catalog, create_app, normalize_result
 from hermes_mcp_gateway.upstreams import (
-    ContextModeClient,
     SamchonGraphClient,
     _SamchonGraphSession,
     missing_expected,
@@ -39,10 +38,10 @@ class GatewayPolicyTests(unittest.TestCase):
             tool("image_generate"),
             tool("computer_use"),
         ]
-        catalog = build_catalog([tool("ctx_search")], available, [])
+        catalog = build_catalog( available, [])
         self.assertEqual(
             set(catalog),
-            {"ctx_search", "vision_analyze", "skills_list", "terminal", "image_generate"},
+            {"vision_analyze", "skills_list", "terminal", "image_generate"},
         )
         self.assertNotIn("computer_use", catalog)
 
@@ -52,13 +51,13 @@ class GatewayPolicyTests(unittest.TestCase):
             tool("skills_list"),
             tool("image_gen"),
         ]
-        catalog = build_catalog([], available, [])
+        catalog = build_catalog( available, [])
         self.assertNotIn("image_generate", catalog)
         self.assertNotIn("image_gen", catalog)
 
     def test_collision_fails_closed(self):
         with self.assertRaisesRegex(ValueError, "collision"):
-            build_catalog([tool("vision_analyze")], [tool("vision_analyze")], [])
+            build_catalog([tool("vision_analyze")], [tool("vision_analyze")])
 
     def test_missing_expected_is_explicit(self):
         self.assertEqual(
@@ -111,7 +110,7 @@ class GatewayPolicyTests(unittest.TestCase):
 
     def test_catalog_exposes_only_samchon_graph_tool(self):
         catalog = build_catalog(
-            [],
+
             [],
             [],
             graph_tools=[tool("inspect_code_graph"), tool("unexpected_tool")],
@@ -122,7 +121,7 @@ class GatewayPolicyTests(unittest.TestCase):
 
 
     def test_lsp_tools_are_catalogued_as_read_only_gateway_adapter(self):
-        catalog = build_catalog([], [], [], lsp_tools=lsp_tool_schemas())
+        catalog = build_catalog( [], [], lsp_tools=lsp_tool_schemas())
         self.assertEqual({name for name, entry in catalog.items() if entry.source == "lsp"}, LSP_TOOLS)
         self.assertFalse(any(token in name for name in LSP_TOOLS for token in ("rename", "format", "action")))
 
@@ -158,7 +157,7 @@ class GatewayPolicyTests(unittest.TestCase):
                 "required": ["result"],
             },
         )
-        catalog = build_catalog([], [vision], [])
+        catalog = build_catalog( [vision], [])
         self.assertIsNone(catalog["vision_analyze"].tool.output_schema)
         self.assertIsNotNone(vision.output_schema)
 
@@ -173,22 +172,20 @@ class GatewayPolicyTests(unittest.TestCase):
                 "required": ["result"],
             },
         )
-        catalog = build_catalog([], [browser], [])
+        catalog = build_catalog( [browser], [])
         self.assertIsNone(catalog["browser_navigate"].tool.output_schema)
         self.assertIsNotNone(browser.output_schema)
 
-    def test_public_surface_count_is_47_with_lsp_and_samchon_graph(self):
-        from hermes_mcp_gateway.config import CONTEXT_REQUIRED
+    def test_catalog_count_with_native_execution(self):
 
         self.assertEqual(
-            len(CONTEXT_REQUIRED)
-            + len(HERMES_ALLOWLIST)
+            len(HERMES_ALLOWLIST)
             + len(CAPABILITY_TOOLS)
             + len(MEMORY_TOOLS)
             + 1  # Samchon Graph
             + len(LSP_TOOLS)
             + 1,  # startup_context
-            47,
+            40,
         )
 
 
@@ -198,50 +195,6 @@ class ReconnectionTests(unittest.IsolatedAsyncioTestCase):
             create_app()
         self.assertFalse(server.return_value.streamable_http_app.call_args.kwargs["stateless_http"])
 
-    async def test_read_only_context_call_recovers_from_connection_reset(self):
-        import httpx
-        client = ContextModeClient("http://127.0.0.1:3050/mcp")
-        params = {"name": "ctx_search", "arguments": {"queries": ["needle"]}}
-        with patch.object(client, "_rpc_once", new_callable=AsyncMock, side_effect=[httpx.ReadError("reset"), {"content": []}]) as rpc, patch("hermes_mcp_gateway.upstreams.asyncio.sleep", new_callable=AsyncMock) as sleep:
-            self.assertEqual(await client._rpc_with_retry("tools/call", params), {"content": []})
-        self.assertEqual(rpc.await_count, 2)
-        sleep.assert_awaited_once()
-        await client.close()
-
-    async def test_read_only_context_call_stops_after_bounded_retries(self):
-        import httpx
-        client = ContextModeClient("http://127.0.0.1:3050/mcp")
-        with patch.object(client, "_rpc_once", new_callable=AsyncMock, side_effect=httpx.ReadError("reset")) as rpc, patch("hermes_mcp_gateway.upstreams.asyncio.sleep", new_callable=AsyncMock) as sleep, self.assertRaises(httpx.ReadError):
-            await client._rpc_with_retry("tools/call", {"name": "ctx_doctor", "arguments": {}})
-        self.assertEqual(rpc.await_count, 5)
-        self.assertEqual(sleep.await_count, 4)
-        await client.close()
-
-    async def test_write_tools_never_retry_after_connection_loss(self):
-        import httpx
-        client = ContextModeClient("http://127.0.0.1:3050/mcp")
-        for tool in ("ctx_execute", "ctx_index", "ctx_purge", "ctx_fetch_and_index"):
-            with self.subTest(tool=tool), patch.object(client, "_rpc_once", new_callable=AsyncMock, side_effect=httpx.ReadError("reset")) as rpc:
-                with self.assertRaises(httpx.ReadError):
-                    await client._rpc_with_retry("tools/call", {"name": tool, "arguments": {}})
-                rpc.assert_awaited_once()
-        await client.close()
-
-    async def test_application_errors_are_not_retried(self):
-        client = ContextModeClient("http://127.0.0.1:3050/mcp")
-        with patch.object(client, "_rpc_once", new_callable=AsyncMock, side_effect=RuntimeError("Context Mode HTTP 503")) as rpc:
-            with self.assertRaisesRegex(RuntimeError, "503"):
-                await client._rpc_with_retry("tools/call", {"name": "ctx_search", "arguments": {}})
-            rpc.assert_awaited_once()
-        await client.close()
-
-    async def test_tool_discovery_recovers_after_connection_refused(self):
-        import httpx
-        client = ContextModeClient("http://127.0.0.1:3050/mcp")
-        with patch.object(client, "_rpc_once", new_callable=AsyncMock, side_effect=[httpx.ConnectError("refused"), {"tools": []}]) as rpc, patch("hermes_mcp_gateway.upstreams.asyncio.sleep", new_callable=AsyncMock):
-            self.assertEqual(await client._rpc_with_retry("tools/list"), {"tools": []})
-            self.assertEqual(rpc.await_count, 2)
-        await client.close()
 
 
 if __name__ == "__main__":
@@ -470,7 +423,7 @@ class BrowserGatewayTests(unittest.IsolatedAsyncioTestCase):
         from hermes_mcp_gateway.server import Gateway
 
         gateway = Gateway()
-        gateway.catalog = build_catalog([], [tool("browser_navigate")], [])
+        gateway.catalog = build_catalog( [tool("browser_navigate")], [])
         gateway.hermes.call_browser = AsyncMock(
             return_value=types.CallToolResult(content=[types.TextContent(text='{"success":true}')])
         )
@@ -509,7 +462,7 @@ class VisionGatewayTests(unittest.IsolatedAsyncioTestCase):
         from hermes_mcp_gateway.server import Gateway
 
         gateway = Gateway()
-        gateway.catalog = build_catalog([], [tool("vision_analyze")], [])
+        gateway.catalog = build_catalog([tool("vision_analyze")], [])
         gateway.hermes.call_vision = AsyncMock(
             return_value=types.CallToolResult(
                 content=[
@@ -536,7 +489,7 @@ class GatewayOwnedToolTests(unittest.IsolatedAsyncioTestCase):
         from hermes_mcp_gateway.server import CatalogEntry, Gateway
         from hermes_mcp_gateway.startup import startup_tool_schema
 
-        catalog = build_catalog([], [], [], [startup_tool_schema()])
+        catalog = build_catalog( [], [], [startup_tool_schema()])
         self.assertEqual(catalog["startup_context"].source, "gateway")
         self.assertIsInstance(catalog["startup_context"], CatalogEntry)
 
@@ -555,7 +508,7 @@ class GatewayOwnedToolTests(unittest.IsolatedAsyncioTestCase):
         from hermes_mcp_gateway.startup import startup_tool_schema
 
         gateway = Gateway()
-        gateway.catalog = build_catalog([], [], [], [startup_tool_schema()])
+        gateway.catalog = build_catalog( [], [], [startup_tool_schema()])
         gateway.startup.read = MagicMock(return_value={"files": []})
         result = await gateway.call("startup_context", {"path": "/etc/passwd"})
         self.assertTrue(result.is_error)
@@ -672,14 +625,6 @@ class BrowserIndependenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["status"], "ok")
 
 
-class ContextReadinessContractTests(unittest.TestCase):
-    def test_gateway_readiness_uses_context_readyz_not_healthz(self):
-        from hermes_mcp_gateway.config import GatewayConfig
-
-        cfg = GatewayConfig()
-        self.assertEqual(cfg.context_ready_url, "http://127.0.0.1:3050/readyz")
-
-
 class OutputSanitizationTests(unittest.TestCase):
     def test_structured_content_is_redacted_even_when_under_limit(self):
         raw = types.CallToolResult(
@@ -783,14 +728,11 @@ class WebReadinessProbeTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await gateway.probe_web_tools())
 
     async def test_start_retries_one_transient_web_probe_failure(self):
-        from hermes_mcp_gateway.config import CONTEXT_REQUIRED, IMAGE_TOOLS
+        from hermes_mcp_gateway.config import IMAGE_TOOLS
         from hermes_mcp_gateway.server import Gateway
 
         gateway = Gateway()
         gateway.hermes.start = AsyncMock()
-        gateway.context.discover = AsyncMock(
-            return_value=[tool(name) for name in sorted(CONTEXT_REQUIRED)]
-        )
         gateway.hermes.discover = AsyncMock(
             return_value=[
                 tool(name)
@@ -817,7 +759,7 @@ class HermesCapabilityGatewayTests(unittest.IsolatedAsyncioTestCase):
 
         gateway = Gateway()
         gateway.catalog = build_catalog(
-            [], [], [], [], capability_tools=capability_tool_schemas()
+             [], [], [], capability_tools=capability_tool_schemas()
         )
         gateway.capabilities.call = AsyncMock(
             return_value=types.CallToolResult(content=[types.TextContent(text='{"success":true}')])
@@ -875,7 +817,7 @@ class LSPGatewayTests(unittest.IsolatedAsyncioTestCase):
         from hermes_mcp_gateway.server import Gateway
 
         gateway = Gateway()
-        gateway.catalog = build_catalog([], [], [], lsp_tools=lsp_tool_schemas())
+        gateway.catalog = build_catalog( [], [], lsp_tools=lsp_tool_schemas())
         gateway.lsp.call = MagicMock(
             return_value={"file": "repo/a.py", "result": {"contents": "ok"}}
         )

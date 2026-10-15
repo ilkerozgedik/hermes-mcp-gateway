@@ -20,7 +20,6 @@ from starlette.routing import Route
 from .capabilities import HermesCapabilities, capability_tool_schemas
 from .config import (
     BROWSER_TOOLS,
-    CONTEXT_REQUIRED,
     DIRECT_HERMES_TOOLS,
     HERMES_ALLOWLIST,
     HERMES_REQUIRED,
@@ -30,12 +29,12 @@ from .config import (
     WEB_TOOLS,
     GatewayConfig,
 )
+from .execution import NativeExecution, execution_schema
 from .lsp import LSPAdapter, lsp_tool_schemas
 from .memory import MemoryAdapter, memory_tool_schemas
 from .startup import StartupContext, startup_tool_schema
 from .tool_discovery import BRIDGE_NAMES, PUBLIC_NAMES, ToolDiscovery, public_schemas
 from .upstreams import (
-    ContextModeClient,
     HermesToolsClient,
     SamchonGraphClient,
     missing_expected,
@@ -87,7 +86,6 @@ class CatalogEntry:
 
 
 def build_catalog(
-    context_tools: list[types.Tool],
     hermes_tools: list[types.Tool],
     memory_tools: list[types.Tool],
     gateway_tools: list[types.Tool] | None = None,
@@ -98,7 +96,6 @@ def build_catalog(
 ) -> dict[str, CatalogEntry]:
     catalog: dict[str, CatalogEntry] = {}
     groups = (
-        ("context", context_tools, None),
         ("hermes", hermes_tools, HERMES_ALLOWLIST),
         ("graph", graph_tools or [], {SAMCHON_GRAPH_TOOL}),
         ("lsp", lsp_tools or [], None),
@@ -179,9 +176,7 @@ def error_result(message: str, *, limit: int) -> types.CallToolResult:
 class Gateway:
     def __init__(self, config: GatewayConfig | None = None):
         self.config = config or GatewayConfig()
-        self.context = ContextModeClient(
-            self.config.context_url, self.config.context_timeout_seconds
-        )
+        self.execution = NativeExecution(self.config)
         self.hermes = HermesToolsClient(self.config)
         self.graph = SamchonGraphClient(self.config)
         self.lsp = LSPAdapter(
@@ -279,23 +274,19 @@ class Gateway:
     async def start(self) -> None:
         try:
             await self.hermes.start()
-            context_tools, hermes_tools, graph_tool = await asyncio.gather(
-                self.context.discover(), self.hermes.discover(), self.graph.describe()
+            hermes_tools, graph_tool = await asyncio.gather(
+                self.hermes.discover(), self.graph.describe()
             )
-            context_names = {tool.name for tool in context_tools}
+            hermes_tools = [t for t in hermes_tools if t.name != "execute_code"]
+            hermes_tools.append(execution_schema())
             hermes_names = {tool.name for tool in hermes_tools}
             if "image_generate" not in hermes_names:
                 hermes_tools.append(deferred_image_tool())
                 hermes_names.add("image_generate")
                 self._deferred_image = True
-            context_missing = missing_expected(context_names, CONTEXT_REQUIRED)
             hermes_missing = missing_expected(hermes_names, HERMES_REQUIRED)
             if not (hermes_names & IMAGE_TOOLS):
                 hermes_missing.add("image_generate")
-            if context_missing:
-                raise RuntimeError(
-                    f"Context Mode missing required tools: {', '.join(sorted(context_missing))}"
-                )
             if hermes_missing:
                 raise RuntimeError(
                     f"Hermes missing required tools: {', '.join(sorted(hermes_missing))}"
@@ -310,7 +301,6 @@ class Gateway:
             self.missing_final_tools = set() if self.web_tools_ready else set(WEB_TOOLS)
             await self.memory.start()
             self.catalog = build_catalog(
-                context_tools,
                 hermes_tools,
                 memory_tool_schemas(),
                 [startup_tool_schema()],
@@ -324,7 +314,7 @@ class Gateway:
             raise
 
     async def close(self) -> None:
-        await self.context.close()
+        await self.execution.close()
         await self.hermes.close()
         await self.graph.close()
         await asyncio.to_thread(self.lsp.close)
@@ -372,15 +362,15 @@ class Gateway:
         if name in STATEFUL_HERMES_TOOLS and not task_id:
             return error_result(
                 "MCP session identity is required for stateful browser/process tools. "
-                "Use a stateful MCP client; independent commands can use ctx_execute.",
+                "Use a stateful MCP client; independent commands can use execute_code.",
                 limit=self.config.max_text_chars,
             )
         try:
             preserve_images = False
-            if entry.source == "context":
-                result = await self.context.call(name, arguments)
-            elif entry.source == "hermes":
-                if name == "image_generate" and self._deferred_image:
+            if entry.source == "hermes":
+                if name == "execute_code":
+                    result = await self.execution.call(arguments)
+                elif name == "image_generate" and self._deferred_image:
                     result = await asyncio.to_thread(call_deferred_image, arguments)
                 elif name == "vision_analyze":
                     result = await self.hermes.call_vision(arguments)
@@ -471,6 +461,7 @@ class Gateway:
                     self.hermes.discover(), timeout=self.config.health_timeout_seconds
                 )
                 names = {tool.name for tool in tools}
+                names.add("execute_code")
                 if self._deferred_image and "image_generate" in self.catalog:
                     names.add("image_generate")
                 missing = missing_expected(names, HERMES_REQUIRED)
@@ -492,15 +483,13 @@ class Gateway:
             except Exception:  # noqa: BLE001 - health probe must degrade, not crash
                 return False
 
-        context_ok, honcho_ok, hermes_status, graph_ready = await asyncio.gather(
-            get_ok(self.config.context_ready_url),
+        honcho_ok, hermes_status, graph_ready = await asyncio.gather(
             get_ok(self.config.honcho_health_url),
             hermes_state(),
             graph_state(),
         )
         hermes_core_ok, web_tools_ok = hermes_status
         components = {
-            "context_mode": context_ok,
             "hermes_tools": hermes_core_ok,
             "web_tools": web_tools_ok,
             "samchon_graph": graph_ready,
@@ -543,7 +532,7 @@ def create_app(config: GatewayConfig | None = None):
         "hermes-mcp-gateway",
         version="0.1.0",
         instructions=(
-            "Single default-deny MCP gateway for Context Mode, curated Hermes "
+            "Single default-deny MCP gateway for native execution, curated Hermes "
             "tools, cwd-scoped Samchon Graph semantics, guarded Hermes capabilities, and Honcho memory."
         ),
         lifespan=lifespan,

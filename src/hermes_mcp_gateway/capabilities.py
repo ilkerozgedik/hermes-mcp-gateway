@@ -43,7 +43,7 @@ _CRON_ALLOWED = frozenset(
 )
 _CRON_MUTATIONS = frozenset({"create", "update", "pause", "resume", "remove", "run"})
 _DELEGATE_ALLOWED = frozenset({"goal", "context", "tasks", "confirmed"})
-_SAFE_DELEGATION_TOOLSETS = ["web", "vision", "skills", "mcp-context-mode"]
+_SAFE_DELEGATION_TOOLSETS = ["web", "vision", "skills", "file", "terminal", "code_execution"]
 
 
 def _text_result(value: str, *, is_error: bool = False) -> types.CallToolResult:
@@ -105,8 +105,8 @@ def capability_tool_schemas() -> list[types.Tool]:
             description=(
                 "Run one or two Hermes leaf subagents synchronously in isolated contexts. "
                 "Spawning costs model inference and requires confirmed=true. Children may use "
-                "web, vision, skills, and Context Mode MCP tools; native shell/file/code tools "
-                "and recursive delegation are not exposed."
+                "web, vision, skills, and native file/terminal/code tools; "
+                "recursive delegation is not exposed."
             ),
             input_schema={
                 "type": "object",

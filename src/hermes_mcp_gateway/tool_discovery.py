@@ -21,7 +21,7 @@ def bridge_schemas() -> list[types.Tool]:
             name="tool_search",
             description=(
                 "Search the Gateway's permitted tools by keywords, e.g. 'browser click', "
-                "'context execute', 'github issue claim'. Additional permitted tools "
+                "'execute code', 'github issue claim'. Additional permitted tools "
                 "are available on demand. Follow with tool_describe for their input schemas, "
                 "then tool_call. Only catalogued tools can be invoked."
             ),

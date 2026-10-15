@@ -20,7 +20,7 @@ class SystemdTemplateTests(unittest.TestCase):
             unit,
         )
         self.assertIn(
-            "Wants=network-online.target context-mode.service agent-runtime.service",
+            "Wants=network-online.target agent-runtime.service",
             unit,
         )
         self.assertNotIn("Requires=", unit)

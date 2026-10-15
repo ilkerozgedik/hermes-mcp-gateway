@@ -187,7 +187,7 @@ class DelegationCapabilityTests(unittest.IsolatedAsyncioTestCase):
 
 
 class DelegationParentPolicyTests(unittest.TestCase):
-    def test_parent_enables_only_safe_native_toolsets_plus_context_mode_mcp(self):
+    def test_parent_enables_only_explicit_native_toolsets(self):
         from hermes_mcp_gateway.capabilities import _build_delegation_parent
 
         parent = MagicMock()
@@ -205,7 +205,7 @@ class DelegationParentPolicyTests(unittest.TestCase):
         ), patch(
             "hermes_cli.runtime_provider.resolve_runtime_provider", return_value=runtime
         ), patch(
-            "tools.mcp_tool_discovery.discover_mcp_tools", return_value=["mcp__context_mode__ctx_execute"]
+            "tools.mcp_tool_discovery.discover_mcp_tools", return_value=["unrelated_mcp_tool"]
         ) as discover, patch(
             "hermes_cli.fallback_config.get_fallback_chain", return_value=[]
         ), patch("run_agent.AIAgent", return_value=parent) as agent_cls:
@@ -217,7 +217,7 @@ class DelegationParentPolicyTests(unittest.TestCase):
         self.assertEqual(kwargs["provider"], "test-provider")
         self.assertEqual(
             kwargs["enabled_toolsets"],
-            ["web", "vision", "skills", "mcp-context-mode"],
+            ["web", "vision", "skills", "file", "terminal", "code_execution"],
         )
         self.assertTrue(kwargs["skip_memory"])
         self.assertTrue(kwargs["skip_context_files"])

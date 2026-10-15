@@ -2,19 +2,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-CONTEXT_REQUIRED = frozenset(
-    {
-        "ctx_execute",
-        "ctx_execute_file",
-        "ctx_index",
-        "ctx_search",
-        "ctx_fetch_and_index",
-        "ctx_batch_execute",
-        "ctx_doctor",
-        "ctx_purge",
-    }
-)
-
 WEB_TOOLS = frozenset({"web_search", "web_extract"})
 
 SAMCHON_GRAPH_TOOL = "inspect_code_graph"
@@ -49,8 +36,7 @@ BROWSER_TOOLS = frozenset(
 
 IMAGE_TOOLS = frozenset({"image_generate"})
 
-# These tools retain resources across calls; unlike Context Mode execution,
-# even foreground terminal calls retain cwd/environment state.
+# These tools retain resources across calls; foreground terminals retain cwd/env.
 STATEFUL_HERMES_TOOLS = BROWSER_TOOLS | frozenset({"terminal", "process_manage"})
 
 HERMES_ALLOWLIST = frozenset(
@@ -61,6 +47,7 @@ HERMES_ALLOWLIST = frozenset(
         "skills_list",
         "skill_view",
         "image_generate",
+        "execute_code",
     }
 ) | BROWSER_TOOLS | DIRECT_HERMES_TOOLS
 
@@ -80,8 +67,6 @@ MEMORY_TOOLS = frozenset(
 class GatewayConfig:
     host: str = "127.0.0.1"
     port: int = 3060
-    context_url: str = "http://127.0.0.1:3050/mcp"
-    context_ready_url: str = "http://127.0.0.1:3050/readyz"
     honcho_health_url: str = "http://127.0.0.1:8000/health"
     hermes_python: str = "/home/hermes/.hermes/venvs/hermes/bin/python"
     hermes_home: str = "/home/hermes/.hermes"
@@ -96,7 +81,10 @@ class GatewayConfig:
     samchon_graph_max_sessions: int = 4
     samchon_graph_timeout_seconds: float = 120.0
     timeout_seconds: float = 30.0
-    context_timeout_seconds: float = 90.0
+    execution_timeout_seconds: float = 300.0
+    execution_max_concurrent: int = 2
+    execution_max_code_bytes: int = 65_536
+    execution_max_worker_bytes: int = 1_048_576
     health_timeout_seconds: float = 3.0
     max_text_chars: int = 65_536
     max_startup_bytes: int = 64 * 1024

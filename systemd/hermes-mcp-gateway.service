@@ -1,7 +1,7 @@
 [Unit]
 Description=Hermes MCP Gateway
-Wants=network-online.target context-mode.service agent-runtime.service
-After=network-online.target context-mode.service agent-runtime.service
+Wants=network-online.target agent-runtime.service
+After=network-online.target agent-runtime.service
 
 [Service]
 Type=simple

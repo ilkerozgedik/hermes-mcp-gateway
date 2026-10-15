@@ -7,7 +7,6 @@ from unittest.mock import AsyncMock, patch
 from mcp import types
 
 from hermes_mcp_gateway.config import (
-    CONTEXT_REQUIRED,
     HERMES_REQUIRED,
     SAMCHON_GRAPH_TOOL,
     WEB_TOOLS,
@@ -31,9 +30,6 @@ class DeferredImageTests(unittest.IsolatedAsyncioTestCase):
         gateway = Gateway()
         gateway.hermes.start = AsyncMock()
         gateway.hermes.call = AsyncMock()
-        gateway.context.discover = AsyncMock(
-            return_value=[tool(name) for name in CONTEXT_REQUIRED]
-        )
         gateway.hermes.discover = AsyncMock(
             return_value=[
                 tool(name)

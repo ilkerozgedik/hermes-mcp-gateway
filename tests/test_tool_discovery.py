@@ -18,23 +18,23 @@ def tool(name):
 class DiscoveryTests(unittest.TestCase):
     def test_public_surface_and_exact_search(self):
         catalog = build_catalog(
-            [tool("ctx_execute")],
-            [tool("skills_list"), tool("browser_click")],
+
+            [tool("execute_code"), tool("skills_list"), tool("browser_click")],
             [tool("memory_context")],
             [tool("startup_context")],
         )
         self.assertEqual(len(public_schemas(catalog)), 6)
         discovery = ToolDiscovery(catalog)
         self.assertEqual(
-            discovery.search({"queries": ["ctx_execute"]})["results"][0]["matches"],
-            ["ctx_execute"],
+            discovery.search({"queries": ["execute_code"]})["results"][0]["matches"],
+            ["execute_code"],
         )
         self.assertNotIn("skills_list", discovery.catalog)
 
     def test_catalog_search_all_names(self):
         catalog = build_catalog(
-            [tool("ctx_execute")],
-            [tool("skills_list"), tool("browser_click")],
+
+            [tool("execute_code"), tool("skills_list"), tool("browser_click")],
             [tool("memory_context")],
             [tool("startup_context")],
             lsp_tools=[tool("lsp_diagnostics")],
@@ -58,8 +58,8 @@ class DiscoveryTests(unittest.TestCase):
     def test_invalid_inputs_rejected(self):
         discovery = ToolDiscovery(
             build_catalog(
-                [tool("ctx_execute")],
-                [tool("skills_list")],
+
+                [tool("execute_code"), tool("skills_list")],
                 [tool("memory_context")],
                 [tool("startup_context")],
             )
@@ -74,7 +74,7 @@ class DiscoveryTests(unittest.TestCase):
                 discovery.search(args)
         for args in (
             {"calls": []},
-            {"calls": [{"name": "ctx_execute", "arguments": {}}] * 2},
+            {"calls": [{"name": "execute_code", "arguments": {}}] * 2},
             {"calls": [{"name": "unknown", "arguments": {}}]},
         ):
             with self.subTest(args=args), self.assertRaises(ValueError):
@@ -85,29 +85,29 @@ class BridgeDispatchTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.gateway = Gateway()
         self.gateway.catalog = build_catalog(
-            [tool("ctx_execute")],
-            [tool("skills_list"), tool("browser_click")],
+
+            [tool("execute_code"), tool("skills_list"), tool("browser_click")],
             [tool("memory_context")],
             [tool("startup_context")],
         )
         self.gateway.discovery = ToolDiscovery(self.gateway.catalog)
 
     async def test_direct_hidden_denied_and_bridge_works(self):
-        self.gateway.context.call = AsyncMock(
+        self.gateway.execution.call = AsyncMock(
             return_value=types.CallToolResult(content=[types.TextContent(text="ok")])
         )
         result = await self.gateway.call(
-            "tool_call", {"calls": [{"name": "ctx_execute", "arguments": {}}]}
+            "tool_call", {"calls": [{"name": "execute_code", "arguments": {}}]}
         )
         assert isinstance(result.content[0], types.TextContent)
         self.assertEqual(result.content[0].text, "ok")
-        self.gateway.context.call.assert_awaited_once_with("ctx_execute", {})
+        self.gateway.execution.call.assert_awaited_once_with({})
 
     async def test_mcp_endpoint_rejects_direct_hidden_tools(self):
         with patch("hermes_mcp_gateway.server.Server") as server:
             create_app()
         callback = server.call_args.kwargs["on_call_tool"]
-        result = await callback(None, SimpleNamespace(name="ctx_execute", arguments={}))
+        result = await callback(None, SimpleNamespace(name="execute_code", arguments={}))
         self.assertTrue(result.is_error)
 
     async def test_browser_session_forwarded(self):
@@ -125,7 +125,7 @@ class BridgeDispatchTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_schema_and_error_preserved(self):
-        self.gateway.context.call = AsyncMock(
+        self.gateway.execution.call = AsyncMock(
             return_value=types.CallToolResult(
                 content=[types.TextContent(text="failed")],
                 structured_content={"error": "blocked"},
@@ -133,7 +133,7 @@ class BridgeDispatchTests(unittest.IsolatedAsyncioTestCase):
             )
         )
         result = await self.gateway.call(
-            "tool_call", {"calls": [{"name": "ctx_execute", "arguments": {}}]}
+            "tool_call", {"calls": [{"name": "execute_code", "arguments": {}}]}
         )
         self.assertTrue(result.is_error)
         self.assertEqual(result.structured_content, {"error": "blocked"})

@@ -8,7 +8,6 @@ from collections import OrderedDict
 from contextlib import AsyncExitStack
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
 from uuid import uuid4
 
 import httpx
@@ -21,10 +20,6 @@ from .config import (
     SAMCHON_GRAPH_TOOL,
     GatewayConfig,
 )
-
-_PROTOCOL = "2026-07-28"
-# Replaying a write or command after a broken connection can duplicate effects.
-_RETRYABLE_CONTEXT_TOOLS = frozenset({"ctx_search", "ctx_doctor"})
 
 
 def missing_expected(actual: set[str], expected: set[str] | frozenset[str]) -> set[str]:
@@ -122,100 +117,6 @@ def _stale_browser_result() -> str:
             "recovery": "browser_navigate",
         }
     )
-
-
-class ContextModeClient:
-    def __init__(self, url: str, timeout: float = 30.0):
-        self.url = url
-        self.timeout = timeout
-        parsed = urlsplit(url)
-        if parsed.scheme != "http" or not parsed.hostname:
-            raise ValueError("Context Mode URL must be plain HTTP")
-        self._client = httpx.AsyncClient(timeout=timeout, trust_env=False)
-
-    async def _rpc_once(
-        self, method: str, params: dict[str, Any] | None = None
-    ) -> dict[str, Any]:
-        meta = {
-            "io.modelcontextprotocol/protocolVersion": _PROTOCOL,
-            "io.modelcontextprotocol/clientInfo": {
-                "name": "hermes-mcp-gateway",
-                "version": "0.1.0",
-            },
-            "io.modelcontextprotocol/clientCapabilities": {},
-        }
-        headers = {
-            "Content-Type": "application/json",
-            "Accept": "application/json, text/event-stream",
-            "MCP-Protocol-Version": _PROTOCOL,
-            "Mcp-Method": method,
-         }
-        if method == "tools/call" and params and params.get("name"):
-            headers["Mcp-Name"] = str(params["name"])
-        body = {
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": method,
-            "params": {**(params or {}), "_meta": meta},
-        }
-        response = await self._client.post(self.url, json=body, headers=headers)
-        try:
-            payload = response.json()
-        except json.JSONDecodeError as exc:
-            raise RuntimeError("Context Mode returned invalid JSON") from exc
-        if response.status_code != 200:
-            message = (
-                payload.get("error", {}).get("message")
-                if isinstance(payload, dict)
-                else None
-            )
-            raise RuntimeError(message or f"Context Mode HTTP {response.status_code}")
-        if payload.get("error"):
-            error = payload["error"]
-            raise RuntimeError(str(error.get("message") or "Context Mode MCP error"))
-        result = payload.get("result")
-        if not isinstance(result, dict):
-            raise TypeError("Context Mode returned an invalid MCP result")
-        return result
-
-    async def _rpc_with_retry(
-        self, method: str, params: dict[str, Any] | None = None
-    ) -> dict[str, Any]:
-        retryable = method == "tools/list" or (
-            method == "tools/call"
-            and params is not None
-            and params.get("name") in _RETRYABLE_CONTEXT_TOOLS
-        )
-        for attempt in range(5 if retryable else 1):
-            try:
-                return await self._rpc_once(method, params)
-            except (httpx.ConnectError, httpx.ReadError, httpx.RemoteProtocolError):
-                if not retryable or attempt == 4:
-                    raise
-                await asyncio.sleep(0.4 * (2 ** attempt))
-        raise AssertionError("unreachable")
-
-    async def _rpc(
-        self, method: str, params: dict[str, Any] | None = None
-    ) -> dict[str, Any]:
-        return await self._rpc_with_retry(method, params)
-
-    async def discover(self) -> list[types.Tool]:
-        result = await self._rpc("tools/list")
-        tools = [types.Tool.model_validate(item) for item in result.get("tools", [])]
-        unexpected = [tool.name for tool in tools if not tool.name.startswith("ctx_")]
-        if unexpected:
-            raise ValueError(
-                f"unexpected Context Mode tool(s): {', '.join(sorted(unexpected))}"
-            )
-        return tools
-
-    async def call(self, name: str, arguments: dict[str, Any]) -> types.CallToolResult:
-        result = await self._rpc("tools/call", {"name": name, "arguments": arguments})
-        return types.CallToolResult.model_validate(result)
-
-    async def close(self) -> None:
-        await self._client.aclose()
 
 
 class _SamchonGraphSession:

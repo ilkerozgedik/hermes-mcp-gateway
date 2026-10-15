@@ -20,7 +20,6 @@ class MCPClientIsolationTests(unittest.IsolatedAsyncioTestCase):
     async def test_two_real_mcp_sessions_have_distinct_stable_tool_ownership(self):
         async def fake_start(gateway):
             gateway.catalog = build_catalog(
-                [],
                 [tool("skills_list"), tool("browser_click")],
                 [tool("memory_context")],
                 [tool("startup_context")],

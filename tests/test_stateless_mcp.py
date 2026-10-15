@@ -51,10 +51,11 @@ class StatelessHTTPTests(unittest.IsolatedAsyncioTestCase):
         async def fake_start(gateway):
             self.gateway = gateway
             gateway.catalog = build_catalog(
-                [tool(name) for name in ("ctx_doctor", "ctx_search", "ctx_execute")],
+
                 [
                     tool(name)
                     for name in (
+                        "execute_code",
                         "skills_list",
                         "skill_view",
                         "browser_click",
@@ -67,7 +68,7 @@ class StatelessHTTPTests(unittest.IsolatedAsyncioTestCase):
                 [tool("startup_context")],
             )
             gateway.discovery = ToolDiscovery(gateway.catalog)
-            gateway.context.call = AsyncMock(return_value=success())
+            gateway.execution.call = AsyncMock(return_value=success())
             gateway.hermes.call = AsyncMock(return_value=success())
             gateway.hermes.call_direct = AsyncMock(return_value=success())
 
@@ -78,7 +79,7 @@ class StatelessHTTPTests(unittest.IsolatedAsyncioTestCase):
             gateway.hermes.call_browser = AsyncMock(side_effect=browser)
 
         async def fake_close(gateway):
-            await gateway.context.close()
+            await gateway.execution.close()
 
         # Temporary observation at the real SDK handler boundary: only safe metadata.
         from hermes_mcp_gateway.server import Server
@@ -190,19 +191,19 @@ class StatelessHTTPTests(unittest.IsolatedAsyncioTestCase):
         await self.assert_stateless_executes("skill_view", {"name": "hermes-agent"})
         self.gateway.hermes.call.assert_awaited_once()
 
-    async def test_sessionless_ctx_doctor(self):
-        await self.assert_stateless_executes("ctx_doctor")
-        self.gateway.context.call.assert_awaited_once()
+    async def test_sessionless_execute_code(self):
+        await self.assert_stateless_executes("execute_code")
+        self.gateway.execution.call.assert_awaited_once()
 
-    async def test_sessionless_ctx_search(self):
-        await self.assert_stateless_executes("ctx_search", {"queries": ["needle"]})
-        self.gateway.context.call.assert_awaited_once()
+    async def test_sessionless_execute_code(self):
+        await self.assert_stateless_executes("execute_code", {"queries": ["needle"]})
+        self.gateway.execution.call.assert_awaited_once()
 
-    async def test_sessionless_independent_ctx_execute(self):
+    async def test_sessionless_independent_execute_code(self):
         await self.assert_stateless_executes(
-            "ctx_execute", {"language": "python", "code": "print('ok')"}
+            "execute_code", {"language": "python", "code": "print('ok')"}
         )
-        self.gateway.context.call.assert_awaited_once()
+        self.gateway.execution.call.assert_awaited_once()
 
     async def test_sessionless_native_file_tool(self):
         await self.assert_stateless_executes("read_file", {"path": "README.md"})
@@ -232,13 +233,13 @@ class StatelessHTTPTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_sessionless_concurrent_tools_execute_without_shared_owner(self):
         results = await asyncio.gather(
-            self.modern_call("ctx_doctor"),
+            self.modern_call("execute_code"),
             self.modern_call(
-                "ctx_execute", {"language": "python", "code": "print('ok')"}
+                "execute_code", {"language": "python", "code": "print('ok')"}
             ),
         )
         self.assertTrue(all(not result.is_error for result in results))
-        self.assertEqual(self.gateway.context.call.await_count, 2)
+        self.assertEqual(self.gateway.execution.call.await_count, 2)
         self.assertFalse(
             any(observation["sdk_session_present"] for observation in self.observations)
         )
@@ -246,7 +247,7 @@ class StatelessHTTPTests(unittest.IsolatedAsyncioTestCase):
     async def test_unknown_and_invalid_deferred_calls_still_fail_closed(self):
         result = await self.modern_call("not_allowed")
         self.assertTrue(result.is_error)
-        self.gateway.context.call.assert_not_awaited()
+        self.gateway.execution.call.assert_not_awaited()
         self.gateway.hermes.call.assert_not_awaited()
 
     async def legacy_initialize(self):
@@ -382,17 +383,17 @@ class StatelessHTTPTests(unittest.IsolatedAsyncioTestCase):
     async def test_modern_disconnect_cancels_downstream_call(self):
         started, cancelled = asyncio.Event(), asyncio.Event()
 
-        async def blocking_call(_name, _arguments):
+        async def blocking_call(_arguments):
             started.set()
             try:
                 await asyncio.Event().wait()
             finally:
                 cancelled.set()
 
-        self.gateway.context.call = AsyncMock(side_effect=blocking_call)
+        self.gateway.execution.call = AsyncMock(side_effect=blocking_call)
         request = asyncio.create_task(
             self.modern_call(
-                "ctx_execute", {"language": "python", "code": "print('ok')"}
+                "execute_code", {"language": "python", "code": "print('ok')"}
             )
         )
         try:
@@ -432,7 +433,7 @@ class OwnershipPolicyTests(unittest.IsolatedAsyncioTestCase):
     async def test_gateway_dispatch_cannot_fall_back_to_global_owner(self):
         gateway = Gateway()
         gateway.catalog = build_catalog(
-            [],
+
             [tool(name) for name in ("browser_click", "terminal", "process_manage")],
             [],
         )
@@ -445,4 +446,4 @@ class OwnershipPolicyTests(unittest.IsolatedAsyncioTestCase):
             gateway.hermes.call_browser.assert_not_awaited()
             gateway.hermes.call_direct.assert_not_awaited()
         finally:
-            await gateway.context.close()
+            await gateway.execution.close()
