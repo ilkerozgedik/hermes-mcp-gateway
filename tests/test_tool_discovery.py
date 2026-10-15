@@ -23,7 +23,10 @@ class DiscoveryTests(unittest.TestCase):
             [tool("memory_context")],
             [tool("startup_context")],
         )
-        self.assertEqual(len(public_schemas(catalog)), 6)
+        self.assertEqual(
+            [item.name for item in public_schemas(catalog)],
+            ['tool_search', 'tool_describe', 'tool_call', 'memory_context', 'skills_list', 'startup_context'],
+        )
         discovery = ToolDiscovery(catalog)
         self.assertEqual(
             discovery.search({"queries": ["execute_code"]})["results"][0]["matches"],

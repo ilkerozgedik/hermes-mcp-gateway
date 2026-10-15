@@ -206,9 +206,9 @@ class StatelessHTTPTests(unittest.IsolatedAsyncioTestCase):
         await self.assert_stateless_executes("execute_code")
         self.gateway.execution.call.assert_awaited_once()
 
-    async def test_sessionless_execute_code(self):
-        await self.assert_stateless_executes("execute_code", {"queries": ["needle"]})
-        self.gateway.execution.call.assert_awaited_once()
+    async def test_sessionless_execute_code_forwarded_arguments(self):
+        await self.assert_stateless_executes("execute_code", {"code": "print('ok')"})
+        self.gateway.execution.call.assert_awaited_once_with({"code": "print('ok')"})
 
     async def test_sessionless_independent_execute_code(self):
         await self.assert_stateless_executes(

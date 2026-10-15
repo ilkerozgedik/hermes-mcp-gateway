@@ -116,7 +116,7 @@ def public_schemas(catalog: dict[str, Any]) -> list[types.Tool]:
             f"Gateway public tools missing: {', '.join(sorted(missing))}"
         )
     return bridge_schemas() + [
-        entry.tool for name, entry in catalog.items() if name in ALWAYS_VISIBLE
+        catalog[name].tool for name in sorted(ALWAYS_VISIBLE)
     ]
 
 
