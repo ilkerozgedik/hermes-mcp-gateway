@@ -143,6 +143,44 @@ class LSPAdapterTests(unittest.TestCase):
         self.adapter.call("lsp_diagnostics", {"file": str(self.file)})
         self.assertEqual(len(self.client.opened), 2)
 
+    def test_delayed_typescript_seed_is_followed_by_fresh_diagnostics(self):
+        import asyncio
+
+        class DelayedSeedClient(FakeClient):
+            async def open_file(self, path, *, language_id="plaintext"):
+                version = await super().open_file(path, language_id=language_id)
+                if version == 0:
+                    self._docs[path].seed_seen = False
+                    asyncio.get_running_loop().call_later(
+                        1.2, setattr, self._docs[path], "seed_seen", True
+                    )
+                return version
+
+            async def wait_for_diagnostics(self, path, version, *, mode="document", timeout=None):
+                return version > 0 and self._docs[path].seed_seen
+
+        self.client = DelayedSeedClient()
+        self.service.client = self.client
+        self.service.seed_first_push = True
+        self.adapter._timeout = 3.0
+        self.adapter.call("lsp_diagnostics", {"file": str(self.file)})
+        self.assertEqual(len(self.client.opened), 2)
+
+    def test_missing_seed_is_not_reported_as_clean(self):
+        class NoSeedClient(FakeClient):
+            async def open_file(self, path, *, language_id="plaintext"):
+                version = await super().open_file(path, language_id=language_id)
+                self._docs[path].seed_seen = False
+                return version
+
+        self.client = NoSeedClient()
+        self.service.client = self.client
+        self.service.seed_first_push = True
+        self.adapter._timeout = 0.2
+        with self.assertRaisesRegex(RuntimeError, "fresh diagnostics verdict"):
+            self.adapter.call("lsp_diagnostics", {"file": str(self.file)})
+        self.assertEqual(len(self.client.opened), 1)
+
     def test_close_shuts_down_service(self):
         self.adapter.close()
         self.assertTrue(self.service.shutdown_called)

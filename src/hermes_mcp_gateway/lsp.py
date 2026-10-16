@@ -209,30 +209,39 @@ class LSPAdapter:
                 "no installed/available Hermes LSP server for this file; automatic installation is disabled"
             )
         server = self._service._server_for(str(file_path))
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self._timeout
         version = await client.open_file(
             str(file_path),
             language_id=language_id_for(str(file_path), server),
         )
 
-        # Hermes marks the first TypeScript diagnostics push as a baseline seed.
-        # For a read-only query we need a current verdict, so wait for that seed
-        # and send one no-op didChange to obtain the next, fresh diagnostics set.
+        # Hermes marks TypeScript's first diagnostics push as a baseline seed.
+        # Cold tsserver startup can take longer than five seconds. Wait for the
+        # baseline before sending a no-op didChange; otherwise that first push
+        # is discarded and the read-only request falsely times out as "no verdict".
+        # Share one bounded deadline across both waits; never report a missing
+        # diagnostics push as a clean document.
         if server is not None and server.seed_first_push:
-            loop = asyncio.get_running_loop()
-            seed_deadline = loop.time() + min(5.0, max(0.5, self._timeout / 3))
             abs_path = str(file_path)
-            while loop.time() < seed_deadline:
+            while True:
                 doc = client._docs.get(abs_path)
                 if doc is not None and doc.seed_seen:
                     version = await client.open_file(
                         abs_path, language_id=language_id_for(abs_path, server)
                     )
                     break
-                await asyncio.sleep(0.05)
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    return None
+                await asyncio.sleep(min(0.05, remaining))
 
         await client.save_file(str(file_path))
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            return None
         fresh = await client.wait_for_diagnostics(
-            str(file_path), version, mode="document", timeout=self._timeout
+            str(file_path), version, mode="document", timeout=remaining
         )
         if not fresh:
             return None
