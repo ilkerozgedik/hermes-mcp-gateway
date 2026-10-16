@@ -1,4 +1,5 @@
 import asyncio
+import json
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -376,6 +377,46 @@ class SamchonGraphConcurrencyTests(unittest.IsolatedAsyncioTestCase):
 
 
 class BrowserGatewayTests(unittest.IsolatedAsyncioTestCase):
+    async def test_successful_page_text_does_not_trigger_stale_tab_recovery(self):
+        from unittest.mock import patch
+
+        from hermes_mcp_gateway.config import GatewayConfig
+        from hermes_mcp_gateway.upstreams import HermesToolsClient
+
+        page = json.dumps({
+            "success": True, "url": "https://example.com",
+            "snapshot": "Help article: tab no longer exists",
+        })
+        client = HermesToolsClient(GatewayConfig())
+        with patch("model_tools.handle_function_call", return_value=page) as dispatch, patch(
+            "hermes_mcp_gateway.upstreams._reset_camofox_session"
+        ) as reset:
+            result = await client.call_browser(
+                "browser_navigate", {"url": "https://example.com"},
+                task_id="chatgpt:session-a",
+            )
+
+        self.assertEqual(result.content[0].text, page)
+        dispatch.assert_called_once()
+        reset.assert_not_called()
+
+    async def test_stale_phrase_in_successful_snapshot_does_not_drop_binding(self):
+        from unittest.mock import patch
+
+        from hermes_mcp_gateway.config import GatewayConfig
+        from hermes_mcp_gateway.upstreams import HermesToolsClient
+
+        page = json.dumps({"success": True, "snapshot": "410 Client Error: Gone"})
+        client = HermesToolsClient(GatewayConfig())
+        with patch("model_tools.handle_function_call", return_value=page), patch(
+            "hermes_mcp_gateway.upstreams._reset_camofox_session"
+        ) as reset:
+            result = await client.call_browser(
+                "browser_snapshot", {}, task_id="chatgpt:session-a"
+            )
+        self.assertEqual(result.content[0].text, page)
+        reset.assert_not_called()
+
     async def test_browser_navigate_recovers_once_from_stale_camofox_tab(self):
         from unittest.mock import patch
 

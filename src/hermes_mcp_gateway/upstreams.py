@@ -10,7 +10,6 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-import httpx
 from mcp import ClientSession, StdioServerParameters, types
 from mcp.client.stdio import stdio_client
 
@@ -48,7 +47,7 @@ def _vision_value_to_result(value: Any) -> types.CallToolResult:
         image_url = part.get("image_url")
         data_url = image_url.get("url") if isinstance(image_url, dict) else None
         if not isinstance(data_url, str):
-            raise ValueError("Hermes vision image payload is missing a data URL")
+            raise TypeError("Hermes vision image payload is missing a data URL")
         header, separator, data = data_url.partition(",")
         if (
             not separator
@@ -84,12 +83,15 @@ def _browser_result_is_stale(value: str) -> bool:
     except (TypeError, json.JSONDecodeError):
         payload = None
 
-    fragments = [value]
     if isinstance(payload, dict):
-        fragments.extend(
+        if payload.get("success") is True:
+            return False
+        # Snapshot text is untrusted page content, not an error from Camofox.
+        haystack = " ".join(
             str(payload.get(key, "")) for key in ("error", "code", "recovery")
-        )
-    haystack = " ".join(fragments).lower()
+        ).lower()
+    else:
+        haystack = value.lower()
     return any(marker in haystack for marker in _BROWSER_STALE_MARKERS)
 
 
@@ -99,7 +101,7 @@ def _reset_camofox_session(task_id: str) -> None:
         from tools.browser_camofox import _drop_session
 
         _drop_session(task_id)
-    except Exception:
+    except Exception:  # noqa: BLE001 - optional Camofox cleanup must be best effort
         # The gateway must remain usable with a non-Camofox Hermes installation.
         return
 
