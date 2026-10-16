@@ -51,6 +51,21 @@ class CapabilityErrorPropagationTests(unittest.IsolatedAsyncioTestCase):
 
 
 class CronCapabilityTests(unittest.IsolatedAsyncioTestCase):
+    async def test_cron_list_forwards_to_hermes_including_disabled(self):
+        capabilities = HermesCapabilities()
+        native = json.dumps({"success": True, "count": 2, "jobs": [
+            {"job_id": "one", "enabled": True},
+            {"job_id": "two", "enabled": False},
+        ]})
+        with patch("hermes_mcp_gateway.capabilities.cronjob", return_value=native) as cron:
+            result = await capabilities.call(
+                "cronjob", {"action": "list", "include_disabled": True}
+            )
+        self.assertFalse(result.is_error)
+        self.assertEqual(result.content[0].text, native)
+        self.assertEqual(cron.call_args.kwargs["action"], "list")
+        self.assertTrue(cron.call_args.kwargs["include_disabled"])
+
     def test_cron_schema_hides_unsafe_execution_and_provider_fields(self):
         schemas = {tool.name: tool for tool in capability_tool_schemas()}
         self.assertIn("cronjob", schemas)
