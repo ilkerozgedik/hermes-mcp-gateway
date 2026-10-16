@@ -8,6 +8,8 @@ from typing import Any
 
 from agent.redact import redact_sensitive_text
 from mcp import types
+
+
 def _load_honcho_components():
     """Load Honcho components through Hermes' plugin catalog API."""
     from plugins.memory import import_provider_module

@@ -42,13 +42,17 @@ def main():
         owner, code = payload['owner'], payload['code']
         if not isinstance(owner, str) or not owner.startswith('chatgpt:execution:'):
             raise ValueError('server execution identity required')
-        from gateway.session_context import set_session_vars, clear_session_vars
-        from tools.approval_context import set_hermes_interactive_context, reset_hermes_interactive_context
-        from tools.terminal_tool import set_approval_callback
+        from agent.redact import redact_sensitive_text
+        from gateway.session_context import clear_session_vars, set_session_vars
+        from model_tools import handle_function_call
+        from tools.approval_context import (
+            reset_hermes_interactive_context,
+            set_hermes_interactive_context,
+        )
         from tools.code_execution_tool import SANDBOX_ALLOWED_TOOLS
         from tools.code_kernel import shutdown_all_kernels
-        from model_tools import handle_function_call
-        from agent.redact import redact_sensitive_text
+        from tools.terminal_tool import set_approval_callback
+
         from .execution import RPC_TOOLS
         # A nonempty explicit grant is critical: upstream empty intersections
         # intentionally fall back to the full native sandbox allowlist.

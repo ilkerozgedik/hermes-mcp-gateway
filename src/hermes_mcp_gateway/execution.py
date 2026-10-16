@@ -151,6 +151,7 @@ class NativeExecution:
         env.update(HERMES_HOME=self.config.hermes_home, HERMES_QUIET='1', HERMES_REDACT_SECRETS='true')
         # Do not depend on callers starting from the repo or on relative PYTHONPATH.
         from pathlib import Path
+
         import tools
         package_root = str(Path(__file__).resolve().parents[1])
         hermes_root = str(Path(tools.__file__).resolve().parent.parent)

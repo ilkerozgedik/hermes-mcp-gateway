@@ -230,7 +230,7 @@ class HermesCapabilities:
             _ = create_job_with_scheduler_registration
             _ = AIAgent
             return _default_db_path().parent.exists()
-        except Exception:
+        except Exception:  # noqa: BLE001 - readiness degrades on any upstream error
             return False
 
     async def call(self, name: str, arguments: dict[str, Any]) -> types.CallToolResult:
