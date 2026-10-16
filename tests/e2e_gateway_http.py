@@ -68,6 +68,20 @@ async def exercise(url: str, report: dict) -> None:
         assert "Gateway Streamable HTTP endpoint" in text(read)
         assert "Gateway Streamable HTTP endpoint" in read["structuredContent"]["file_text"]
         report["checks"]["modern_native_file"] = True
+        # The pinned Hermes source is larger than the Gateway output budget.
+        large_path = "/srv/agents/src/hermes-agent/cron/jobs.py"
+        paged = await call("read_file", {"path": large_path, "limit": 2000})
+        page = paged["structuredContent"]
+        assert page["file_text"].startswith("1|"), page
+        assert page["truncated"] and page["next_offset"] > 1, page
+        assert f"offset={page['next_offset']}" in page["hint"], page
+        continued = await call(
+            "read_file", {"path": large_path, "offset": page["next_offset"], "limit": 2}
+        )
+        assert continued["structuredContent"]["file_text"].startswith(
+            f"{page['next_offset']}|"
+        ), continued
+        report["checks"]["modern_native_file_pagination"] = True
         executed = await call("execute_code", {
             "code": "from hermes_tools import terminal\nprint(terminal('printf gateway-http-native-ok'))",
         })

@@ -141,8 +141,10 @@ def _sanitize_structure(value: Any) -> Any:
     return redact_sensitive_text(str(value), force=True)
 
 
-def _structured_read_file_result(result: types.CallToolResult) -> types.CallToolResult:
-    """Expose Hermes' file data without an ambiguous nested "content" envelope."""
+def _structured_read_file_result(
+    result: types.CallToolResult, *, limit: int
+) -> types.CallToolResult:
+    """Expose Hermes file content as MCP data, preserving pagination on large reads."""
     if result.is_error or result.structured_content is not None or len(result.content) != 1:
         return result
     item = result.content[0]
@@ -154,9 +156,53 @@ def _structured_read_file_result(result: types.CallToolResult) -> types.CallTool
         return result
     if not isinstance(payload, dict) or not isinstance(payload.get("content"), str):
         return result
-    structured = {k: v for k, v in payload.items() if k not in {"content", "file_text"}}
-    structured["file_text"] = payload["content"]
-    return result.model_copy(update={"structured_content": structured})
+
+    def structured_value(data: dict[str, Any]) -> dict[str, Any]:
+        fields = {k: v for k, v in data.items() if k not in {"content", "file_text"}}
+        return {**fields, "file_text": data["content"]}
+
+    structured = structured_value(payload)
+    if len(json.dumps(_sanitize_structure(structured), ensure_ascii=False)) <= limit:
+        return result.model_copy(update={"structured_content": structured})
+
+    # Hermes already supplies numbered lines; only shrink the MCP response envelope.
+    lines = payload["content"].splitlines(keepends=True)
+    kept: list[str] = []
+    size = 0
+    for line in lines:
+        if size + len(line) > limit // 2:
+            break
+        kept.append(line)
+        size += len(line)
+
+    while kept:
+        numbered = kept[-1].split("|", 1)[0]
+        if not numbered.isdecimal():
+            return error_result("read_file pagination requires Hermes numbered lines", limit=limit)
+        next_offset = int(numbered) + 1
+        page = {
+            **payload,
+            "content": "".join(kept).rstrip("\n"),
+            "truncated": True,
+            "next_offset": next_offset,
+            "hint": f"Gateway output limit reached; continue with offset={next_offset}.",
+        }
+        structured = structured_value(page)
+        text = json.dumps(page, ensure_ascii=False)
+        if (
+            len(text) <= limit
+            and len(json.dumps(_sanitize_structure(structured), ensure_ascii=False)) <= limit
+        ):
+            return types.CallToolResult(
+                content=[types.TextContent(text=text)], structured_content=structured
+            )
+        kept.pop()
+
+    return error_result(
+        "read_file single line exceeds the Gateway output limit; "
+        "use a more targeted native file operation.",
+        limit=limit,
+    )
 
 
 def normalize_result(
@@ -488,7 +534,9 @@ class Gateway:
                         name, arguments, task_id=task_id
                     )
                     if name == "read_file":
-                        result = _structured_read_file_result(result)
+                        result = _structured_read_file_result(
+                            result, limit=self.config.max_text_chars
+                        )
                 else:
                     result = await self.hermes.call(name, arguments)
                 if name in WEB_TOOLS and self._tool_result_has_error(result):
