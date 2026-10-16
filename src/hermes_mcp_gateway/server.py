@@ -170,7 +170,7 @@ def _structured_read_file_result(
     kept: list[str] = []
     size = 0
     for line in lines:
-        if size + len(line) > limit // 2:
+        if size + len(line) > limit:
             break
         kept.append(line)
         size += len(line)

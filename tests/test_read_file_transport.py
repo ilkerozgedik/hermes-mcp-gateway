@@ -67,6 +67,22 @@ class ReadFileTransportTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(f"offset={structured['next_offset']}", structured["hint"])
         self.assertEqual(json.loads(result.content[0].text)["content"], structured["file_text"])
 
+    async def test_large_first_line_fitting_serialized_result_is_not_rejected(self):
+        first_line = "1|" + "a" * 40000
+        payload = {
+            "content": first_line + "\n2|" + "b" * 40000,
+            "total_lines": 2,
+            "file_size": 80006,
+            "truncated": False,
+            "not_found": False,
+        }
+        gateway = self.gateway(json.dumps(payload))
+        result = await gateway.call("read_file", {"path": "/tmp/large-lines.txt"})
+        self.assertFalse(result.is_error)
+        self.assertEqual(result.structured_content["file_text"], first_line)
+        self.assertTrue(result.structured_content["truncated"])
+        self.assertEqual(result.structured_content["next_offset"], 2)
+
     async def test_oversized_single_line_fails_without_silent_content_loss(self):
         payload = {
             "content": "1|" + "x" * 3000,
