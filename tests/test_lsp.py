@@ -181,6 +181,99 @@ class LSPAdapterTests(unittest.TestCase):
             self.adapter.call("lsp_diagnostics", {"file": str(self.file)})
         self.assertEqual(len(self.client.opened), 1)
 
+    def test_repeated_typescript_diagnostics_reuse_current_verdict(self):
+        class NoOpSuppressingClient(FakeClient):
+            async def open_file(self, path, *, language_id="plaintext"):
+                previous = self._docs.get(path)
+                text = Path(path).read_text(encoding="utf-8-sig", errors="replace")
+                changed = previous is None or previous.text != text
+                version = await super().open_file(path, language_id=language_id)
+                doc = self._docs[path]
+                doc.version = version
+                doc.text = text
+                doc.push_version = -1
+                doc.fresh = lambda: doc.push_version >= doc.version
+                self.changed = changed
+                return version
+
+            async def wait_for_diagnostics(self, path, version, *, mode="document", timeout=None):
+                # First TS sync gets a verdict; subsequent identical didChange is ignored.
+                if version > 1 and not self.changed:
+                    return False
+                self._docs[path].push_version = version
+                return True
+
+        self.client = NoOpSuppressingClient()
+        self.service.client = self.client
+        self.service.seed_first_push = True
+
+        for _ in range(3):
+            self.assertEqual(len(self.adapter.call("lsp_diagnostics", {"file": str(self.file)})["diagnostics"]), 1)
+        self.assertEqual(len(self.client.opened), 2)
+
+        # Other read-only requests must not invalidate diagnostics for identical text.
+        self.adapter.call("lsp_document_symbols", {"file": str(self.file)})
+        self.assertEqual(len(self.client.opened), 2)
+        self.adapter.call("lsp_diagnostics", {"file": str(self.file)})
+        self.assertEqual(len(self.client.opened), 2)
+
+        # Empty, verified diagnostics are also valid and must be reusable.
+        self.client.diagnostics_for = lambda *_args, **_kwargs: []
+        self.assertEqual(
+            self.adapter.call("lsp_diagnostics", {"file": str(self.file)})["diagnostics"], []
+        )
+        self.assertEqual(len(self.client.opened), 2)
+
+        # A real edit must trigger fresh analysis, not reuse the previous verdict.
+        self.file.write_text("x = 2\n")
+        self.adapter.call("lsp_diagnostics", {"file": str(self.file)})
+        self.assertEqual(len(self.client.opened), 3)
+
+    def test_late_initial_seed_can_recover_on_next_request(self):
+        class LateSeedClient(FakeClient):
+            async def open_file(self, path, *, language_id="plaintext"):
+                version = await super().open_file(path, language_id=language_id)
+                doc = self._docs[path]
+                doc.version = version
+                doc.text = Path(path).read_text()
+                doc.seed_seen = version > 0
+                doc.fresh = lambda: False
+                return version
+
+            async def wait_for_diagnostics(self, path, version, *, mode="document", timeout=None):
+                return version > 0
+
+        self.client = LateSeedClient()
+        self.service.client = self.client
+        self.service.seed_first_push = True
+        self.adapter._timeout = 0.1
+        with self.assertRaisesRegex(RuntimeError, "fresh diagnostics verdict"):
+            self.adapter.call("lsp_diagnostics", {"file": str(self.file)})
+        self.assertEqual(len(self.client.opened), 1)
+        # A baseline that arrives after timeout is not a usable verdict.
+        self.client._docs[str(self.file)].seed_seen = True
+        self.adapter.call("lsp_diagnostics", {"file": str(self.file)})
+        self.assertEqual(len(self.client.opened), 2)
+
+    def test_unverified_diagnostics_are_never_reused(self):
+        class UnverifiedClient(FakeClient):
+            async def open_file(self, path, *, language_id="plaintext"):
+                version = await super().open_file(path, language_id=language_id)
+                doc = self._docs[path]
+                doc.version = version
+                doc.text = Path(path).read_text()
+                doc.fresh = lambda: False
+                return version
+
+            async def wait_for_diagnostics(self, path, version, *, mode="document", timeout=None):
+                return False
+
+        self.client = UnverifiedClient()
+        self.service.client = self.client
+        for _ in range(2):
+            with self.assertRaisesRegex(RuntimeError, "fresh diagnostics verdict"):
+                self.adapter.call("lsp_diagnostics", {"file": str(self.file)})
+
     def test_close_shuts_down_service(self):
         self.adapter.close()
         self.assertTrue(self.service.shutdown_called)

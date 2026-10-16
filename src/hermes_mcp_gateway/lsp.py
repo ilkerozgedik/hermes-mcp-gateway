@@ -184,6 +184,24 @@ class LSPAdapter:
             out[key] = self._normalize_lsp_value(item)
         return out
 
+    @staticmethod
+    def _unchanged_document(client: Any, file_path: Path) -> Any | None:
+        """Reuse LSP state only while the on-disk text matches the open document."""
+        doc = client._docs.get(str(file_path))
+        if doc is None or getattr(doc, "version", -1) < 0:
+            return None
+        text = file_path.read_text(encoding="utf-8-sig", errors="replace")
+        return doc if text == doc.text else None
+
+    async def _sync_document(self, client: Any, file_path: Path, server: Any) -> int:
+        doc = self._unchanged_document(client, file_path)
+        if doc is not None:
+            return doc.version
+        return await client.open_file(
+            str(file_path),
+            language_id=language_id_for(str(file_path), server),
+        )
+
     async def _request_async(
         self, file_path: Path, method: str, params: dict[str, Any]
     ) -> Any:
@@ -193,10 +211,7 @@ class LSPAdapter:
                 "no installed/available Hermes LSP server for this file; automatic installation is disabled"
             )
         server = self._service._server_for(str(file_path))
-        await client.open_file(
-            str(file_path),
-            language_id=language_id_for(str(file_path), server),
-        )
+        await self._sync_document(client, file_path, server)
         return await client._send_request_with_retry(
             method, params, timeout=self._timeout
         )
@@ -211,10 +226,13 @@ class LSPAdapter:
         server = self._service._server_for(str(file_path))
         loop = asyncio.get_running_loop()
         deadline = loop.time() + self._timeout
-        version = await client.open_file(
-            str(file_path),
-            language_id=language_id_for(str(file_path), server),
-        )
+        prior_doc = client._docs.get(str(file_path))
+        doc = self._unchanged_document(client, file_path)
+        # A verified, still-current LSP verdict (including an empty diagnostics
+        # list) needs no new didChange. TS may suppress diagnostics for no-op edits.
+        if doc is not None and callable(getattr(doc, "fresh", None)) and doc.fresh():
+            return list(client.diagnostics_for(str(file_path), fresh_only=True))
+        version = await self._sync_document(client, file_path, server)
 
         # Hermes marks TypeScript's first diagnostics push as a baseline seed.
         # Cold tsserver startup can take longer than five seconds. Wait for the
@@ -222,7 +240,11 @@ class LSPAdapter:
         # is discarded and the read-only request falsely times out as "no verdict".
         # Share one bounded deadline across both waits; never report a missing
         # diagnostics push as a clean document.
-        if server is not None and server.seed_first_push:
+        if server is not None and server.seed_first_push and (
+            prior_doc is None
+            or not getattr(prior_doc, "seed_seen", False)
+            or (doc is not None and callable(getattr(doc, "fresh", None)) and not doc.fresh())
+        ):
             abs_path = str(file_path)
             while True:
                 doc = client._docs.get(abs_path)
