@@ -9,11 +9,10 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
-from pathlib import Path
 import uuid
+from pathlib import Path
 
 import httpx
-
 from e2e_native import PROTOCOL, text, unpack
 
 
@@ -67,6 +66,7 @@ async def exercise(url: str, report: dict) -> None:
         report["checks"]["modern_describe"] = True
         read = await call("read_file", {"path": str(Path(__file__).resolve()), "limit": 2})
         assert "Gateway Streamable HTTP endpoint" in text(read)
+        assert "Gateway Streamable HTTP endpoint" in read["structuredContent"]["file_text"]
         report["checks"]["modern_native_file"] = True
         executed = await call("execute_code", {
             "code": "from hermes_tools import terminal\nprint(terminal('printf gateway-http-native-ok'))",

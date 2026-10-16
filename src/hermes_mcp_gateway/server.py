@@ -141,6 +141,24 @@ def _sanitize_structure(value: Any) -> Any:
     return redact_sensitive_text(str(value), force=True)
 
 
+def _structured_read_file_result(result: types.CallToolResult) -> types.CallToolResult:
+    """Expose Hermes' file data without an ambiguous nested "content" envelope."""
+    if result.is_error or result.structured_content is not None or len(result.content) != 1:
+        return result
+    item = result.content[0]
+    if not isinstance(item, types.TextContent):
+        return result
+    try:
+        payload = json.loads(item.text)
+    except (ValueError, TypeError):
+        return result
+    if not isinstance(payload, dict) or not isinstance(payload.get("content"), str):
+        return result
+    structured = {k: v for k, v in payload.items() if k not in {"content", "file_text"}}
+    structured["file_text"] = payload["content"]
+    return result.model_copy(update={"structured_content": structured})
+
+
 def normalize_result(
     result: types.CallToolResult, *, limit: int, preserve_images: bool = False
 ) -> types.CallToolResult:
@@ -469,6 +487,8 @@ class Gateway:
                     result = await self.hermes.call_direct(
                         name, arguments, task_id=task_id
                     )
+                    if name == "read_file":
+                        result = _structured_read_file_result(result)
                 else:
                     result = await self.hermes.call(name, arguments)
                 if name in WEB_TOOLS and self._tool_result_has_error(result):
