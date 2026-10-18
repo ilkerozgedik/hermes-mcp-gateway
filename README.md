@@ -31,6 +31,8 @@ Hermes is default-deny and may expose only:
 
 The gateway does not expose `browser_exec`, `browser_cdp`, `computer_use`, raw Hermes memory/todo state, TTS, or Kanban tools. `session_search`, `delegate_task`, and `cronjob` are exposed only through gateway-owned guarded adapters, not through the stateless Hermes allowlist.
 
+Hermes Agent also uses the existing read-only LSP adapter directly through a separate stdio MCP entrypoint: `python -m hermes_mcp_gateway.lsp_stdio`. It exposes only `lsp_diagnostics`, `lsp_hover`, `lsp_definition`, `lsp_references`, `lsp_document_symbols`, and `lsp_status`. The same project-root allowlist, manual-only language-server installation policy, and LSP workspace trust rules apply. This is a native Hermes MCP connection, not a loopback call into the ChatGPT Gateway.
+
 Samchon Graph is exposed as one `inspect_code_graph` tool. The caller supplies an absolute `cwd`; the gateway resolves it inside the allowlisted work/source roots and reuses a bounded resident MCP session per project root. The upstream MCP surface must contain exactly that one graph tool.
 
 Guarded Hermes capabilities are:
