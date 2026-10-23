@@ -86,6 +86,19 @@ a workdir under the configured allowlisted project roots, an optional random
 (default: 1800). It uses existing Hermes `terminal(background=true,
 persist_on_release=true)`; the Gateway is **not** a second command executor.
 
+**Parallel agents:** Four jobs globally, at most two per verified MCP session.
+Admission is atomic in SQLite even when two Gateway instances race. Active
+jobs cannot use the same or nested working directories: create a separate
+Git worktree for each agent, even when working on the same repository.
+Status/cancel synchronize per job, so a slow native poll cannot block an
+unrelated job. A full quota or busy workspace returns an explicit error,
+not an unbounded queue. The per-session allowance is **not a durable
+per-person quota**: a new session gets a fresh identity. Enforcing limits
+across all sessions for one person would require a trusted stable principal
+from the authenticated ingress. Interactive terminal, browser, Git remotes,
+databases, and manual filesystem changes are not workspace-locked by this
+job admission mechanism; coordinate shared operations separately.
+
 **Save the returned `job_id` and one-time `recovery_token` securely.**
 A new MCP session may call `job_status` or `job_cancel` with both values;
 the 15-minute interactive session's expiry does not kill an accepted job.
