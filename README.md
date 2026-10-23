@@ -57,6 +57,39 @@ Memory tools are:
 
 Memory identity is resolved through Hermes Honcho configuration. The existing `workspace=hermes` and user peer are preserved; only this adapter's assistant peer is `chatgpt`. Conclusion writes require a durable kind (`preference`, `decision`, `architecture`, `project_state`) and reject secret-like or explicitly temporary content. List/delete operations retain Honcho semantics.
 
+## Resumable background jobs
+
+For a build, test suite, or other command longer than a brief terminal call, use the
+deferred `job_start` tool instead of waiting on a foreground `terminal` request.
+Open an MCP session with `session_open` first. `job_start` accepts a command,
+a workdir under the configured allowlisted project roots, an optional random
+`idempotency_key` (16–128 characters), and a `max_runtime` of 1–7200 seconds
+(default: 1800). It uses existing Hermes `terminal(background=true,
+persist_on_release=true)`; the Gateway is **not** a second command executor.
+
+**Save the returned `job_id` and one-time `recovery_token` securely.**
+A new MCP session may call `job_status` or `job_cancel` with both values;
+the 15-minute interactive session's expiry does not kill an accepted job.
+The ID alone grants no access. The Gateway stores only a hash of the token
+and bounded, redacted output in a permission-restricted SQLite receipt.
+A status may be `running`, `succeeded`, `failed`, `cancelled`,
+`timed_out`, or `unknown`. A completed result remains available for seven
+days, subject to Hermes' existing native process/result retention.
+
+Never blindly retry `git push`, deploy, migrations, or other side effects
+after an ambiguous or missing response. The same idempotency key cannot
+launch the same command again; a duplicate returns the earlier job ID,
+**not** the recovery token. Losing the one-time token can make recovery
+impossible. Check the external system's actual state before any new attempt.
+
+Gateway restarts may terminate live processes with their systemd cgroup.
+A newly started Gateway can recover durable receipts and query Hermes'
+native process registry if the underlying process still exists, but it
+must report `unknown` when actual completion cannot be established.
+This mechanism does not guarantee recovery from a ChatGPT application-side
+pause or an outage of the VPS itself. Original `terminal` calls retain
+their current behavior; only work launched via `job_start` is resumable.
+
 ## Native execution limits
 
 Discover and describe `execute_code`, then call it through `tool_call` with `code`. The Gateway does not require a redundant client-supplied confirmation flag: user consent is handled by the ChatGPT host. This is not authorization proof at the MCP transport; access remains restricted to loopback and the authenticated Tunnel Client. The Gateway's allowlists, owner isolation, and resource limits remain in force.
