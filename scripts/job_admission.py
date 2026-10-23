@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 from pathlib import Path
 import sqlite3
 import stat
@@ -69,6 +70,32 @@ def status(path: Path) -> dict:
         db.close()
 
 
+def snapshot(path: Path, destination: Path) -> None:
+    source = connect(path)
+    created = False
+    try:
+        fd = os.open(destination, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
+        os.close(fd)
+        created = True
+        target = sqlite3.connect(destination, timeout=3)
+        try:
+            deadline = time.monotonic() + 10
+
+            def progress(*_):
+                if time.monotonic() > deadline:
+                    raise ValueError("SQLite snapshot exceeded its deadline")
+
+            source.backup(target, pages=100, progress=progress, sleep=0.05)
+        finally:
+            target.close()
+    except BaseException:
+        if created:
+            destination.unlink(missing_ok=True)
+        raise
+    finally:
+        source.close()
+
+
 def bounded_seconds(raw: str) -> float:
     value = float(raw)
     if not math.isfinite(value) or not 0 <= value <= 7200:
@@ -78,14 +105,21 @@ def bounded_seconds(raw: str) -> float:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("status", "drain", "resume"))
+    parser.add_argument("action", choices=("status", "drain", "resume", "snapshot"))
     parser.add_argument("--database", required=True, type=Path)
+    parser.add_argument("--destination", type=Path)
     parser.add_argument("--timeout", type=bounded_seconds, default=120.0)
     parser.add_argument("--interval", type=bounded_seconds, default=1.0)
     args = parser.parse_args(argv)
     if not 0 < args.interval <= 10:
         parser.error("Interval must be positive and at most 10 seconds")
     try:
+        if args.action == "snapshot":
+            if args.destination is None:
+                parser.error("Snapshot requires --destination")
+            snapshot(args.database, args.destination)
+            print(json.dumps({"snapshot_created": True}))
+            return 0
         if args.action != "status":
             set_draining(args.database, args.action == "drain")
         deadline = time.monotonic() + args.timeout

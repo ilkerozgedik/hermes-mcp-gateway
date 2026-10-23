@@ -77,6 +77,17 @@ class AdmissionControlTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(target.read_bytes(), before)
 
+    def test_snapshot_is_consistent_private_and_never_overwrites(self):
+        with sqlite3.connect(self.path) as db:
+            db.execute("INSERT INTO jobs VALUES('done','succeeded')")
+        destination = self.path.with_name("before-deploy.sqlite3")
+        result = self.call("snapshot", "--destination", str(destination))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(destination.stat().st_mode & 0o777, 0o600)
+        with sqlite3.connect(destination) as db:
+            self.assertEqual(db.execute("SELECT * FROM jobs").fetchall(), [("done", "succeeded")])
+        self.assertNotEqual(self.call("snapshot", "--destination", str(destination)).returncode, 0)
+
     def test_invalid_timeout_cannot_change_admission(self):
         before = self.path.read_bytes()
         result = self.call("drain", "--timeout", "-1")
