@@ -801,7 +801,10 @@ def create_app(config: GatewayConfig | None = None):
             "Use tool_search, tool_describe, then tool_call for deferred tools. For browser, "
             "terminal and process continuity on modern sessionless MCP, discover and call "
             "session_open once, pass its returned session_token at the top level of every "
-            "related tool_call, and use session_close when finished."
+            "related tool_call, and use session_close when finished. "
+            "For builds, test suites, and other long commands prefer job_start over "
+            "foreground terminal; save the one-time recovery_token and query job_status "
+            "from a new session after disconnect. Never blindly retry mutations."
         ),
         lifespan=lifespan,
         on_list_tools=list_tools,
