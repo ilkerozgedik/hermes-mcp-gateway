@@ -57,6 +57,25 @@ Memory tools are:
 
 Memory identity is resolved through Hermes Honcho configuration. The existing `workspace=hermes` and user peer are preserved; only this adapter's assistant peer is `chatgpt`. Conclusion writes require a durable kind (`preference`, `decision`, `architecture`, `project_state`) and reject secret-like or explicitly temporary content. List/delete operations retain Honcho semantics.
 
+## Execution Guard
+
+Direct MCP `terminal` is restricted to short foreground commands: at most
+**30 seconds**, with `timeout=30` explicitly supplied to Hermes if omitted.
+Any direct background request, PTY mode, foreground request above the cap,
+or background-only notification/persistence option fails **before execution**
+with `LONG_RUNNING_OPERATION_REQUIRES_JOB`. Use `job_start` for build,
+test, deploy or other potentially lengthy work. Native terminal enforces
+its subprocess deadline; cancelling only a Python thread would **not** safely
+stop its child processes, so the gateway deliberately does not use
+`asyncio.wait_for(to_thread(...))` as a hard-kill mechanism.
+
+`execute_code` retains its isolated worker/process-tree cleanup and now
+has a **30-second** total deadline, including queue wait. Neither tool's
+timeout rolls back effects already performed. Tool selection remains the
+agent's choice, but an incorrect long/background choice is rejected rather
+than silently started unrecoverably. The dedicated job adapter is exempt
+from these direct terminal restrictions.
+
 ## Resumable background jobs
 
 For a build, test suite, or other command longer than a brief terminal call, use the
@@ -96,7 +115,7 @@ Discover and describe `execute_code`, then call it through `tool_call` with `cod
 
 Every call invokes unmodified upstream Hermes `execute_code` inside a new Linux worker. A child subreaper keeps double-forked descendants owned until cleanup. Interpreter state **does not persist** between Gateway requests; `reset` is accepted for native schema compatibility but each worker already starts fresh. The native whole-script approval guard runs in a request-bound context; the callback grants only the dispatched script once, and denies further approval requests. No session/always/YOLO grant is installed. Existing operator approval configuration still applies.
 
-Limits: 64 KiB UTF-8 code, two concurrent workers, 300-second total deadline including queue wait, 1 MiB per worker stdout/stderr transport stream, and 65,536-character redacted Gateway output. Native defaults additionally cap tool calls at 50 and stdout at 50 KiB; configured native limits can be stricter. Child environment scrubbing and the explicit native RPC allowlist remain active. Only `read_file`, `write_file`, `search_files`, `patch`, foreground `terminal`, `web_search`, and `web_extract` are granted over RPC. Direct Python imports/subprocesses are not restricted by that allowlist and can access user files; execution is not a security jail. Context Mode indexing/search is intentionally not emulated.
+Limits: 64 KiB UTF-8 code, two concurrent workers, **30-second total deadline** including queue wait, 1 MiB per worker stdout/stderr transport stream, and 65,536-character redacted Gateway output. Native defaults additionally cap tool calls at 50 and stdout at 50 KiB; configured native limits can be stricter. Child environment scrubbing and the explicit native RPC allowlist remain active. Only `read_file`, `write_file`, `search_files`, `patch`, foreground `terminal`, `web_search`, and `web_extract` are granted over RPC. Direct Python imports/subprocesses are not restricted by that allowlist and can access user files; execution is not a security jail. Context Mode indexing/search is intentionally not emulated.
 
 ## Browser
 
