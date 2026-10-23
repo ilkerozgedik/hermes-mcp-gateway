@@ -70,6 +70,7 @@ class GatewayConfig:
     honcho_health_url: str = "http://127.0.0.1:8000/health"
     hermes_python: str = "/home/hermes/.hermes/venvs/hermes/bin/python"
     hermes_home: str = "/home/hermes/.hermes"
+    job_state_dir: str | None = None
     hermes_cwd: str = "/home/hermes/.hermes"
     samchon_graph_command: str = "/home/hermes/.local/bin/samchon-graph"
     samchon_graph_schema_cwd: str = "/srv/agents/src/hermes-mcp-gateway"

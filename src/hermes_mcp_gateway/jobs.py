@@ -14,6 +14,7 @@ import secrets
 import sqlite3
 import time
 from pathlib import Path
+from weakref import WeakValueDictionary
 
 from mcp import types
 from agent.redact import redact_sensitive_text
@@ -37,7 +38,9 @@ def job_tool_schemas() -> list[types.Tool]:
     return [
         tool("job_start", "Start a resumable, bounded native Hermes background terminal job. "
              "Returns a one-time recovery credential: save it securely. Do not retry an "
-             "uncertain side-effectful request without checking external state.",
+             "uncertain side-effectful request without checking external state. "
+             "Concurrent agents must use separate Git worktrees; each MCP session "
+             "may run at most two of the four global jobs.",
              {"command": {"type": "string", "minLength": 1, "maxLength": 8192},
               "workdir": {"type": "string", "minLength": 1, "maxLength": 1024},
               "max_runtime": {"type": "integer", "minimum": 1, "maximum": 7200, "default": 1800},
@@ -53,7 +56,7 @@ def job_tool_schemas() -> list[types.Tool]:
 
 class ResumableJobs:
     def __init__(self, hermes, directory: Path, *, allowed_roots: tuple[str, ...],
-                 max_active: int = 4):
+                 max_active: int = 4, max_per_session: int = 2):
         self.hermes = hermes
         self.directory = Path(directory)
         self.directory.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -63,7 +66,8 @@ class ResumableJobs:
             os.close(fd)
         self.allowed_roots = tuple(Path(root).resolve() for root in allowed_roots)
         self.max_active = max_active
-        self.lock = asyncio.Lock()
+        self.max_per_session = max_per_session
+        self._job_locks: WeakValueDictionary[str, asyncio.Lock] = WeakValueDictionary()
         with self._connect() as db:
             db.execute("""CREATE TABLE IF NOT EXISTS jobs (
                 job_id TEXT PRIMARY KEY,
@@ -76,8 +80,23 @@ class ResumableJobs:
                 deadline REAL NOT NULL,
                 updated REAL NOT NULL,
                 exit_code INTEGER,
-                output TEXT NOT NULL DEFAULT ''
+                output TEXT NOT NULL DEFAULT '',
+                owner_hash TEXT,
+                workdir TEXT
             )""")
+            columns = {row[1] for row in db.execute("PRAGMA table_info(jobs)")}
+            for column in ("owner_hash", "workdir"):
+                if column not in columns:
+                    db.execute(f"ALTER TABLE jobs ADD COLUMN {column} TEXT")
+
+    def _lock_for(self, job_id):
+        if not isinstance(job_id, str):
+            raise PermissionError("invalid job credential")
+        lock = self._job_locks.get(job_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._job_locks[job_id] = lock
+        return lock
 
     def _connect(self):
         return sqlite3.connect(self.path, timeout=3)
@@ -127,16 +146,16 @@ class ResumableJobs:
             raise RuntimeError("native job operation reported an error")
         return payload
 
-    async def call(self, name, args):
+    async def call(self, name, args, *, caller_id=None):
         if name == "job_start":
-            return await self.start(args)
+            return await self.start(args, caller_id=caller_id)
         if name == "job_status":
             return await self.status(args)
         if name == "job_cancel":
             return await self.cancel(args)
         raise ValueError("unknown job tool")
 
-    async def start(self, args):
+    async def start(self, args, *, caller_id=None):
         command = args.get("command")
         workdir = args.get("workdir")
         duration = args.get("max_runtime", 1800)
@@ -155,59 +174,72 @@ class ResumableJobs:
             raise ValueError("invalid idempotency key")
         digest = hashlib.sha256(json.dumps([command, str(path), duration]).encode()).hexdigest()
         idem_digest = hashlib.sha256(idempotency.encode()).hexdigest() if idempotency else None
-        async with self.lock:
-            with self._connect() as db:
-                if idem_digest:
-                    previous = db.execute(
-                        "SELECT job_id, request_hash, state FROM jobs WHERE idempotency_hash=?",
-                        (idem_digest,),
-                    ).fetchone()
-                    if previous:
-                        if previous[1] != digest:
-                            raise ValueError("idempotency key reused with different request")
-                        return {"job_id": previous[0], "state": previous[2],
-                                "recovery_required": True, "replayed": False}
-                active = db.execute(
-                    "SELECT COUNT(*) FROM jobs WHERE state IN ('starting','running') "
-                    "OR (state='unknown' AND deadline>?)", (time.time(),),
-                ).fetchone()[0]
-                if active >= self.max_active:
-                    raise RuntimeError("resumable job capacity reached")
-                job_id = "job_" + secrets.token_hex(16)
-                secret = secrets.token_urlsafe(32)
-                now = time.time()
-                db.execute(
-                    "INSERT INTO jobs (job_id,credential_hash,request_hash,idempotency_hash,native_id,"
-                    "state,created,deadline,updated,exit_code) VALUES (?,?,?,?,?,?,?,?,?,?)",
-                    (job_id, hashlib.sha256(secret.encode()).hexdigest(),
-                     digest, idem_digest, None, "starting", now, now + duration, now, None),
-                )
-            # Reserve before dispatch. An ambiguous failure must never trigger an automatic replay.
-            try:
-                native = await asyncio.wait_for(
-                    self._native("terminal", {
-                        "command": command,
-                        "workdir": str(path),
-                        "background": True,
-                        "persist_on_release": True,
-                        "notify": False,
-                    }, job_id),
-                    timeout=12,
-                )
-                native_id = native.get("session_id")
-                if not isinstance(native_id, str) or not native_id.startswith("proc_"):
-                    raise RuntimeError("native terminal returned no process handle")
-                self._update(job_id, "running", native_id=native_id)
-                state = "running"
-            except asyncio.CancelledError:
-                self._update(job_id, "unknown")
-                raise
-            except Exception:
-                # An underlying thread may outlive a cancelled await; never replay it.
-                self._update(job_id, "unknown")
-                state = "unknown"
-            return {"job_id": job_id, "state": state, "recovery_token": secret,
-                    "max_runtime": duration}
+        # Only the Gateway supplies a verified session owner. A recovery token,
+        # not the session owner, authorizes later status/cancel calls.
+        owner_hash = hashlib.sha256(caller_id.encode()).hexdigest() if caller_id else None
+        now = time.time()
+        # BEGIN IMMEDIATE serializes admission across multiple gateway instances,
+        # rather than relying on an in-process asyncio lock.
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            if idem_digest:
+                previous = db.execute(
+                    "SELECT job_id, request_hash, state FROM jobs WHERE idempotency_hash=?",
+                    (idem_digest,),
+                ).fetchone()
+                if previous:
+                    if previous[1] != digest:
+                        raise ValueError("idempotency key reused with different request")
+                    return {"job_id": previous[0], "state": previous[2],
+                            "recovery_required": True, "replayed": False}
+            active = db.execute(
+                "SELECT owner_hash, workdir FROM jobs WHERE state IN ('starting','running') "
+                "OR (state='unknown' AND deadline>?)", (now,),
+            ).fetchall()
+            if len(active) >= self.max_active:
+                raise RuntimeError("resumable job capacity reached")
+            if owner_hash and sum(row[0] == owner_hash for row in active) >= self.max_per_session:
+                raise RuntimeError("resumable job session capacity reached")
+            for _, existing_dir in active:
+                if existing_dir:
+                    other = Path(existing_dir)
+                    if path == other or path in other.parents or other in path.parents:
+                        raise RuntimeError("resumable job workspace busy; use a separate worktree")
+            job_id = "job_" + secrets.token_hex(16)
+            secret = secrets.token_urlsafe(32)
+            db.execute(
+                "INSERT INTO jobs (job_id,credential_hash,request_hash,idempotency_hash,native_id,"
+                "state,created,deadline,updated,exit_code,owner_hash,workdir) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                (job_id, hashlib.sha256(secret.encode()).hexdigest(),
+                 digest, idem_digest, None, "starting", now, now + duration, now, None,
+                 owner_hash, str(path)),
+            )
+        # Native work happens outside the SQLite transaction. A missing result
+        # is unknown and must never trigger an automatic retry of a mutation.
+        try:
+            native = await asyncio.wait_for(
+                self._native("terminal", {
+                    "command": command,
+                    "workdir": str(path),
+                    "background": True,
+                    "persist_on_release": True,
+                    "notify": False,
+                }, job_id), timeout=12,
+            )
+            native_id = native.get("session_id")
+            if not isinstance(native_id, str) or not native_id.startswith("proc_"):
+                raise RuntimeError("native terminal returned no process handle")
+            self._update(job_id, "running", native_id=native_id)
+            state = "running"
+        except asyncio.CancelledError:
+            self._update(job_id, "unknown")
+            raise
+        except Exception:
+            self._update(job_id, "unknown")
+            state = "unknown"
+        return {"job_id": job_id, "state": state, "recovery_token": secret,
+                "max_runtime": duration}
 
     async def _adopt(self, job_id):
         # One Hermes owner is created per job; query only that owner's processes.
@@ -245,7 +277,7 @@ class ResumableJobs:
         return state, exit_code, output
 
     async def status(self, args):
-        async with self.lock:
+        async with self._lock_for(args.get("job_id")):
             row = self._authorized(args)
             job_id, _, _, _, native_id, state, created, deadline, _, exit_code, output = row
             if state in ("starting", "unknown") and not native_id:
@@ -265,7 +297,7 @@ class ResumableJobs:
                     "created": created, "deadline": deadline, "output": output[-MAX_OUTPUT:]}
 
     async def cancel(self, args):
-        async with self.lock:
+        async with self._lock_for(args.get("job_id")):
             row = self._authorized(args)
             job_id, native_id, state = row[0], row[4], row[5]
             if state == "unknown" and not native_id:
@@ -297,21 +329,27 @@ class ResumableJobs:
             db.execute("DELETE FROM jobs WHERE state IN ('succeeded','failed','cancelled',"
                        "'timed_out','unknown') AND updated<?", (now - RESULT_RETENTION,))
         for job_id, native_id, deadline, last_output, updated in active:
-            if not native_id and now - updated < 60:
-                continue
-            if not native_id:
-                native_id = await self._adopt(job_id)
-            if not native_id:
-                if deadline < now:
-                    self._update(job_id, "unknown")
-                continue
-            try:
-                state, _, _ = await self._poll(job_id, native_id, last_output)
-                if state != "running" or deadline >= now:
+            async with self._lock_for(job_id):
+                # Status/cancel may have completed this job after the initial query.
+                current = self._get(job_id)
+                if current is None or current[5] not in ("running", "starting", "unknown"):
                     continue
-                await asyncio.wait_for(self._native("process_manage", {
-                    "action": "kill", "session_id": native_id,
-                }, job_id), timeout=12)
-                self._update(job_id, "timed_out")
-            except Exception:
-                self._update(job_id, "unknown")
+                native_id, last_output = current[4], current[10]
+                if not native_id and now - current[8] < 60:
+                    continue
+                if not native_id:
+                    native_id = await self._adopt(job_id)
+                if not native_id:
+                    if deadline < now:
+                        self._update(job_id, "unknown")
+                    continue
+                try:
+                    state, _, _ = await self._poll(job_id, native_id, last_output)
+                    if state != "running" or deadline >= now:
+                        continue
+                    await asyncio.wait_for(self._native("process_manage", {
+                        "action": "kill", "session_id": native_id,
+                    }, job_id), timeout=12)
+                    self._update(job_id, "timed_out")
+                except Exception:
+                    self._update(job_id, "unknown")

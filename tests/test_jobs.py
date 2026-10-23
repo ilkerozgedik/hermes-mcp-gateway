@@ -189,5 +189,128 @@ class JobTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(recovered.is_error)
         await gateway.execution.close()
 
+    async def test_one_session_cannot_consume_all_global_job_slots(self):
+        from pathlib import Path
+        for n in range(2):
+            directory = Path(self.workdir) / ("agent-a-" + str(n))
+            directory.mkdir()
+            await self.jobs.call("job_start", {"command": "sleep 1", "workdir": str(directory)},
+                                 caller_id="verified-agent-a")
+        other = Path(self.workdir) / "agent-a-2"
+        other.mkdir()
+        with self.assertRaisesRegex(RuntimeError, "session capacity"):
+            await self.jobs.call("job_start", {"command": "sleep 1", "workdir": str(other)},
+                                 caller_id="verified-agent-a")
+        accepted = await self.jobs.call("job_start", {"command": "sleep 1", "workdir": str(other)},
+                                        caller_id="verified-agent-b")
+        self.assertEqual(accepted["state"], "running")
+
+    async def test_workspace_exclusion_rejects_same_or_overlapping_active_directory(self):
+        await self.jobs.call("job_start", {"command": "sleep 1", "workdir": self.workdir},
+                             caller_id="agent-a")
+        nested = Path(self.workdir) / "nested"
+        nested.mkdir()
+        with self.assertRaisesRegex(RuntimeError, "workspace busy"):
+            await self.jobs.call("job_start", {"command": "sleep 1", "workdir": str(nested)},
+                                 caller_id="agent-b")
+        with self.assertRaisesRegex(RuntimeError, "workspace busy"):
+            await self.jobs.call("job_start", {"command": "sleep 1", "workdir": self.workdir},
+                                 caller_id="agent-c")
+
+    async def test_two_adapters_enforce_atomic_global_admission(self):
+        second = ResumableJobs(self.hermes, Path(self.temp.name), allowed_roots=(self.temp.name,), max_active=1)
+        a = Path(self.workdir) / "one"
+        b = Path(self.workdir) / "two"
+        a.mkdir()
+        b.mkdir()
+        results = await asyncio.gather(
+            self.jobs_with_single_slot().call("job_start", {"command": "sleep 1", "workdir": str(a)}, caller_id="first"),
+            second.call("job_start", {"command": "sleep 1", "workdir": str(b)}, caller_id="second"),
+            return_exceptions=True,
+        )
+        self.assertEqual(sum(isinstance(v, dict) for v in results), 1)
+        self.assertEqual(sum(isinstance(v, RuntimeError) for v in results), 1)
+
+    def jobs_with_single_slot(self):
+        return ResumableJobs(self.hermes, Path(self.temp.name),
+                             allowed_roots=(self.temp.name,), max_active=1)
+
+    async def test_slow_job_status_does_not_block_another_job(self):
+        one_dir = Path(self.workdir) / "one"
+        two_dir = Path(self.workdir) / "two"
+        one_dir.mkdir()
+        two_dir.mkdir()
+        first = await self.jobs.call("job_start", {"command": "sleep 1", "workdir": str(one_dir)})
+        second = await self.jobs.call("job_start", {"command": "sleep 1", "workdir": str(two_dir)})
+        slow_started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def slow_dispatch(name, args, *, task_id):
+            if name == "process_manage" and args.get("session_id") == "proc_1234" and task_id.endswith(first["job_id"]):
+                slow_started.set()
+                await release.wait()
+            return await self.dispatch(name, args, task_id=task_id)
+
+        self.hermes.call_direct.side_effect = slow_dispatch
+        slow = asyncio.create_task(self.jobs.call("job_status", {
+            "job_id": first["job_id"], "recovery_token": first["recovery_token"],
+        }))
+        try:
+            await asyncio.wait_for(slow_started.wait(), timeout=2)
+            other = await asyncio.wait_for(self.jobs.call("job_status", {
+                "job_id": second["job_id"], "recovery_token": second["recovery_token"],
+            }), timeout=1)
+            self.assertEqual(other["state"], "succeeded")
+        finally:
+            release.set()
+            await slow
+
+    async def test_idempotency_deduplicates_across_sessions_without_token_leak(self):
+        directory = Path(self.workdir) / "job-one"
+        directory.mkdir()
+        args = {"command": "printf ok", "workdir": str(directory), "idempotency_key": "shared" * 5}
+        first = await self.jobs.call("job_start", args, caller_id="agent-a")
+        again = await self.jobs.call("job_start", args, caller_id="agent-b")
+        self.assertEqual(first["job_id"], again["job_id"])
+        self.assertNotIn("recovery_token", again)
+        self.assertEqual(self.hermes.call_direct.call_count, 1)
+
+    async def test_four_distinct_agents_have_independent_worktrees(self):
+        paths = [Path(self.workdir) / ("worktree-" + str(n)) for n in range(5)]
+        for path in paths:
+            path.mkdir()
+        receipts = await asyncio.gather(*(
+            self.jobs.call("job_start", {"command": "printf ok", "workdir": str(paths[n])},
+                           caller_id="session-" + str(n))
+            for n in range(4)
+        ))
+        self.assertEqual(len({r["job_id"] for r in receipts}), 4)
+        with self.assertRaisesRegex(RuntimeError, "capacity"):
+            await self.jobs.call("job_start", {"command": "printf ok", "workdir": str(paths[4])},
+                                 caller_id="session-4")
+        completed = await asyncio.gather(*(
+            self.jobs.call("job_status", {
+                "job_id": receipt["job_id"], "recovery_token": receipt["recovery_token"],
+            }) for receipt in receipts
+        ))
+        self.assertTrue(all(x["state"] == "succeeded" for x in completed))
+
+    def test_schema_migration_preserves_existing_receipt(self):
+        import sqlite3
+        self.jobs.path.unlink()
+        with sqlite3.connect(self.jobs.path) as db:
+            db.execute("""CREATE TABLE jobs (job_id TEXT PRIMARY KEY, credential_hash TEXT NOT NULL,
+                request_hash TEXT NOT NULL, idempotency_hash TEXT UNIQUE, native_id TEXT,
+                state TEXT NOT NULL, created REAL NOT NULL, deadline REAL NOT NULL,
+                updated REAL NOT NULL, exit_code INTEGER, output TEXT NOT NULL DEFAULT '')""")
+            db.execute("""INSERT INTO jobs VALUES ('job_legacy','hashed','fingerprint',NULL,
+                'proc_legacy','succeeded',1,2,3,0,'retained')""")
+        migrated = ResumableJobs(self.hermes, Path(self.workdir), allowed_roots=(self.workdir,))
+        self.assertEqual(migrated._get("job_legacy")[10], "retained")
+        with sqlite3.connect(migrated.path) as db:
+            columns = {row[1] for row in db.execute("PRAGMA table_info(jobs)")}
+        self.assertIn("owner_hash", columns)
+        self.assertIn("workdir", columns)
+
     def test_catalog_contains_job_tools(self):
         self.assertEqual({t.name for t in job_tool_schemas()}, {"job_start", "job_status", "job_cancel"})

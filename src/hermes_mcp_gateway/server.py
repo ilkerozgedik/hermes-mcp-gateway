@@ -396,7 +396,7 @@ class Gateway:
             self._web_probe_at = time.monotonic()
             self.missing_final_tools = set() if self.web_tools_ready else set(WEB_TOOLS)
             await self.memory.start()
-            self.jobs = ResumableJobs(self.hermes, Path(self.config.hermes_home),
+            self.jobs = ResumableJobs(self.hermes, Path(self.config.job_state_dir or self.config.hermes_home),
                                       allowed_roots=self.config.samchon_graph_allowed_roots)
             self.catalog = build_catalog(
                 hermes_tools,
@@ -618,7 +618,9 @@ class Gateway:
                 elif name in {"job_start", "job_status", "job_cancel"}:
                     if self.jobs is None:
                         return error_result("job service not started", limit=self.config.max_text_chars)
-                    payload = await self.jobs.call(name, arguments)
+                    payload = await self.jobs.call(
+                        name, arguments, caller_id=task_id if name == "job_start" else None,
+                    )
                     if name == "job_start":
                         return types.CallToolResult(content=[types.TextContent(text=json.dumps(payload))])
                 elif name == "session_open":
