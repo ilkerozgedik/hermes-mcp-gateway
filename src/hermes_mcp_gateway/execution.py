@@ -36,7 +36,7 @@ def execution_schema() -> types.Tool:
             'Interpreter state does not persist between Gateway requests, even for stateful MCP clients. '
             'Use absolute paths or terminal(workdir=...) for project work. No client-supplied owner is accepted. '
             'The native environment scrub, RPC allowlist, tool-call and stdout limits remain active. '
-            'Gateway enforces a 300-second total deadline, 64KiB code cap, bounded concurrency and redacted output. '
+            'Gateway enforces a 30-second total deadline, 64KiB code cap, bounded concurrency and redacted output. '
             'Cancellation kills the worker process tree, but is not rollback. Never automatically retry mutations.\n\n'
             + '\n'.join(line for name, line in __import__('tools.code_execution_tool', fromlist=['_TOOL_DOC_LINES'])._TOOL_DOC_LINES if name in RPC_TOOLS)
         ),

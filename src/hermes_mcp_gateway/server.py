@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from copy import deepcopy
 import json
 import logging
 import secrets
@@ -32,6 +33,7 @@ from .config import (
     GatewayConfig,
 )
 from .execution import NativeExecution, execution_schema
+from .execution_guard import guard_terminal
 from .jobs import ResumableJobs, job_tool_schemas
 from .lsp import LSPAdapter, lsp_tool_schemas
 from .memory import MemoryAdapter, memory_tool_schemas
@@ -121,6 +123,21 @@ def build_catalog(
             if name in catalog:
                 raise ValueError(f"tool collision: {name}")
             public_tool = tool
+            if source == "hermes" and name == "terminal":
+                schema = deepcopy(tool.input_schema)
+                timeout = schema.get("properties", {}).get("timeout")
+                if isinstance(timeout, dict):
+                    timeout["default"] = 30
+                    timeout["maximum"] = 30
+                    timeout["description"] = (
+                        "Foreground only, maximum 30 seconds. "
+                        "For long commands use job_start."
+                    )
+                public_tool = tool.model_copy(update={
+                    "input_schema": schema,
+                    "description": "Execution Guard: short foreground calls only (<=30s); "
+                    "background and long commands require job_start. " + (tool.description or ""),
+                })
             if source == "hermes" and (
                 name == "vision_analyze" or name in BROWSER_TOOLS
             ):
@@ -555,6 +572,12 @@ class Gateway:
                         name, arguments, task_id=task_id
                     )
                 elif name in DIRECT_HERMES_TOOLS:
+                    if name == "terminal":
+                        guarded, reason = guard_terminal(arguments)
+                        if reason:
+                            return error_result(reason, limit=self.config.max_text_chars)
+                        assert guarded is not None
+                        arguments = guarded
                     result = await self.hermes.call_direct(
                         name, arguments, task_id=task_id
                     )

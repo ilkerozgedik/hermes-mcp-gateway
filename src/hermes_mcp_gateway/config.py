@@ -81,7 +81,7 @@ class GatewayConfig:
     samchon_graph_max_sessions: int = 4
     samchon_graph_timeout_seconds: float = 120.0
     timeout_seconds: float = 30.0
-    execution_timeout_seconds: float = 300.0
+    execution_timeout_seconds: float = 30.0
     execution_max_concurrent: int = 2
     execution_max_code_bytes: int = 65_536
     execution_max_worker_bytes: int = 1_048_576
