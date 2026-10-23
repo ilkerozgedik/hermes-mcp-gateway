@@ -3,9 +3,11 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import secrets
 import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -30,6 +32,7 @@ from .config import (
     GatewayConfig,
 )
 from .execution import NativeExecution, execution_schema
+from .jobs import ResumableJobs, job_tool_schemas
 from .lsp import LSPAdapter, lsp_tool_schemas
 from .memory import MemoryAdapter, memory_tool_schemas
 from .sessions import (
@@ -269,6 +272,8 @@ class Gateway:
         self._web_probe_at = time.monotonic()
         self._web_probe_lock = asyncio.Lock()
         self.session_capabilities = SessionCapabilityStore()
+        self.jobs: ResumableJobs | None = None
+        self._job_reaper_task: asyncio.Task[None] | None = None
         self._session_reaper_task: asyncio.Task[None] | None = None
 
     @staticmethod
@@ -374,6 +379,8 @@ class Gateway:
             self._web_probe_at = time.monotonic()
             self.missing_final_tools = set() if self.web_tools_ready else set(WEB_TOOLS)
             await self.memory.start()
+            self.jobs = ResumableJobs(self.hermes, Path(self.config.hermes_home),
+                                      allowed_roots=self.config.samchon_graph_allowed_roots)
             self.catalog = build_catalog(
                 hermes_tools,
                 memory_tool_schemas(),
@@ -381,12 +388,14 @@ class Gateway:
                     startup_tool_schema(),
                     session_open_tool_schema(),
                     session_close_tool_schema(),
+                    *job_tool_schemas(),
                 ],
                 capability_tools=capability_tool_schemas(),
                 graph_tools=[graph_tool],
                 lsp_tools=lsp_tool_schemas(),
             )
             self.discovery = ToolDiscovery(self.catalog)
+            self._job_reaper_task = asyncio.create_task(self._reap_jobs(), name="gateway-job-reaper")
             self._session_reaper_task = asyncio.create_task(
                 self._reap_session_capabilities(),
                 name="gateway-session-capability-reaper",
@@ -396,6 +405,13 @@ class Gateway:
             raise
 
     async def close(self) -> None:
+        if self._job_reaper_task is not None:
+            self._job_reaper_task.cancel()
+            try:
+                await self._job_reaper_task
+            except asyncio.CancelledError:
+                pass
+            self._job_reaper_task = None
         if self._session_reaper_task is not None:
             self._session_reaper_task.cancel()
             try:
@@ -442,6 +458,15 @@ class Gateway:
     ) -> None:
         for record in records:
             await self._cleanup_session_owner(record.task_id)
+
+    async def _reap_jobs(self) -> None:
+        while True:
+            await asyncio.sleep(30)
+            try:
+                if self.jobs is not None:
+                    await self.jobs.maintain()
+            except Exception:
+                logger.exception("Resumable job maintenance failed")
 
     async def _reap_session_capabilities(self) -> None:
         while True:
@@ -506,7 +531,7 @@ class Gateway:
             return error_result(
                 f"Unknown or disallowed tool: {name}", limit=self.config.max_text_chars
             )
-        if name in STATEFUL_HERMES_TOOLS and not task_id:
+        if (name in STATEFUL_HERMES_TOOLS or name == "job_start") and not task_id:
             return error_result(
                 "MCP session identity is required for stateful browser/process tools. "
                 "On modern sessionless MCP, discover and call session_open, then pass "
@@ -567,6 +592,12 @@ class Gateway:
                             limit=self.config.max_text_chars,
                         )
                     payload = await asyncio.to_thread(self.startup.read)
+                elif name in {"job_start", "job_status", "job_cancel"}:
+                    if self.jobs is None:
+                        return error_result("job service not started", limit=self.config.max_text_chars)
+                    payload = await self.jobs.call(name, arguments)
+                    if name == "job_start":
+                        return types.CallToolResult(content=[types.TextContent(text=json.dumps(payload))])
                 elif name == "session_open":
                     if arguments:
                         return error_result(
@@ -735,6 +766,18 @@ def create_app(config: GatewayConfig | None = None):
                     limit=gateway.config.max_text_chars,
                 )
         task_id = lease.task_id if lease is not None else browser_task_id(_ctx)
+        call_names = arguments.get("calls", [])
+        selected = call_names[0].get("name") if isinstance(call_names, list) and call_names and isinstance(call_names[0], dict) else None
+        trace_name = selected if selected in gateway.catalog else "invalid"
+        request_id = secrets.token_hex(8)
+        started = time.monotonic()
+
+        async def warn_if_slow() -> None:
+            await asyncio.sleep(30)
+            logger.warning("slow_mcp_request id=%s tool=%s elapsed_ms=%d",
+                           request_id, trace_name, int((time.monotonic() - started) * 1000))
+
+        monitor = asyncio.create_task(warn_if_slow())
         try:
             return await gateway.call(
                 params.name,
@@ -743,6 +786,9 @@ def create_app(config: GatewayConfig | None = None):
                 session_capability=lease,
             )
         finally:
+            monitor.cancel()
+            logger.info("mcp_request_finished id=%s tool=%s elapsed_ms=%d",
+                        request_id, trace_name, int((time.monotonic() - started) * 1000))
             if lease is not None:
                 await gateway.release_session_token(lease)
 
