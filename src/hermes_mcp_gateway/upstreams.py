@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import logging
 import os
 from collections import OrderedDict
 from contextlib import AsyncExitStack
@@ -12,7 +13,6 @@ from uuid import uuid4
 
 from mcp import ClientSession, StdioServerParameters, types
 from mcp.client.stdio import stdio_client
-from .native_activity import NativeCalls
 
 from .config import (
     DIRECT_HERMES_TOOLS,
@@ -20,6 +20,9 @@ from .config import (
     SAMCHON_GRAPH_TOOL,
     GatewayConfig,
 )
+from .native_activity import NativeCalls
+
+_LOG = logging.getLogger(__name__)
 
 
 def missing_expected(actual: set[str], expected: set[str] | frozenset[str]) -> set[str]:
@@ -133,6 +136,17 @@ class _SamchonGraphSession:
         ) = None
         self._task: asyncio.Task[None] | None = None
         self._failure: Exception | None = None
+        self._pending_operations = 0
+        self._on_activity_finished: Any = None
+
+    @property
+    def has_active_work(self) -> bool:
+        return self.active_calls > 0 or self._pending_operations > 0
+
+    def _finish_operation(self) -> None:
+        self._pending_operations -= 1
+        if self._on_activity_finished is not None:
+            self._on_activity_finished()
 
     def _environment(self) -> dict[str, str]:
         env = {
@@ -183,6 +197,9 @@ class _SamchonGraphSession:
                         if not response.done():
                             response.set_result(None)
                         break
+                    if response.cancelled():
+                        self._finish_operation()
+                        continue
                     try:
                         if operation == "discover":
                             value: Any = list((await session.list_tools()).tools)
@@ -209,6 +226,12 @@ class _SamchonGraphSession:
                     else:
                         if not response.done():
                             response.set_result(value)
+                    finally:
+                        self._finish_operation()
+        except asyncio.CancelledError:
+            if not ready.done():
+                ready.cancel()
+            raise
         except Exception as exc:  # noqa: BLE001 - owner must wake all waiters
             self._failure = exc
             if not ready.done():
@@ -216,7 +239,9 @@ class _SamchonGraphSession:
         finally:
             failure = self._failure or RuntimeError("Samchon Graph session closed")
             while not queue.empty():
-                _, _, response = queue.get_nowait()
+                operation, _, response = queue.get_nowait()
+                if operation != "close":
+                    self._finish_operation()
                 if not response.done():
                     response.set_exception(failure)
 
@@ -248,6 +273,7 @@ class _SamchonGraphSession:
             await self._start_unlocked()
             assert self._queue is not None
             response: asyncio.Future[Any] = loop.create_future()
+            self._pending_operations += 1
             self._queue.put_nowait((operation, payload, response))
         return await response
 
@@ -281,6 +307,23 @@ class _SamchonGraphSession:
             self._queue = None
             self._failure = None
 
+    async def abort(self) -> None:
+        """Cancel a failed or abandoned startup and bound the owner-task wait."""
+        async with self._lifecycle_lock:
+            task = self._task
+            if task is None:
+                return
+            if not task.done():
+                task.cancel()
+                done, _ = await asyncio.wait({task}, timeout=1.0)
+                if not done:
+                    return
+            await asyncio.gather(task, return_exceptions=True)
+            if self._task is task:
+                self._task = None
+                self._queue = None
+                self._failure = None
+
 
 class SamchonGraphClient:
     """Route one public graph tool to a bounded resident session per repository."""
@@ -289,6 +332,7 @@ class SamchonGraphClient:
         self.config = config
         self._sessions: OrderedDict[str, _SamchonGraphSession] = OrderedDict()
         self._lock = asyncio.Lock()
+        self._cleanup_tasks: set[asyncio.Task[Any]] = set()
 
     @staticmethod
     def public_tool(upstream: types.Tool) -> types.Tool:
@@ -343,21 +387,83 @@ class SamchonGraphClient:
             )
         return next(tool for tool in tools if tool.name == SAMCHON_GRAPH_TOOL)
 
-    async def _trim_sessions_unlocked(self, *, protected: str | None = None) -> None:
+    @staticmethod
+    def _session_has_active_work(session: Any) -> bool:
+        return bool(
+            getattr(session, "has_active_work", getattr(session, "active_calls", 0) > 0)
+        )
+
+    def _trim_sessions_unlocked(
+        self, *, protected: str | None = None
+    ) -> list[_SamchonGraphSession]:
+        evicted: list[_SamchonGraphSession] = []
         while len(self._sessions) > self.config.samchon_graph_max_sessions:
             victim = next(
                 (
                     (key, session)
                     for key, session in self._sessions.items()
-                    if key != protected and session.active_calls == 0
+                    if key != protected and not self._session_has_active_work(session)
                 ),
                 None,
             )
             if victim is None:
-                return
+                return evicted
             key, session = victim
             del self._sessions[key]
+            evicted.append(session)
+        return evicted
+
+    @staticmethod
+    async def _close_sessions(sessions: list[_SamchonGraphSession]) -> None:
+        for session in sessions:
             await session.close()
+
+    def _track_cleanup_task(self, task: asyncio.Task[Any]) -> asyncio.Task[Any]:
+        self._cleanup_tasks.add(task)
+        task.add_done_callback(self._cleanup_task_finished)
+        return task
+
+    def _cleanup_task_finished(self, task: asyncio.Task[Any]) -> None:
+        self._cleanup_tasks.discard(task)
+        if task.cancelled():
+            return
+        exception = task.exception()
+        if exception is not None:
+            _LOG.error(
+                "Samchon Graph cleanup task failed",
+                exc_info=(type(exception), exception, exception.__traceback__),
+            )
+
+    def _schedule_close_sessions(
+        self, sessions: list[_SamchonGraphSession]
+    ) -> asyncio.Task[Any] | None:
+        if not sessions:
+            return None
+        task = asyncio.create_task(
+            self._close_sessions(sessions), name="samchon-graph:retire-sessions"
+        )
+        return self._track_cleanup_task(task)
+
+    async def _close_sessions_tracked(
+        self, sessions: list[_SamchonGraphSession]
+    ) -> None:
+        task = self._schedule_close_sessions(sessions)
+        if task is not None:
+            await asyncio.shield(task)
+
+    async def _wait_for_cleanup(self) -> None:
+        while self._cleanup_tasks:
+            tasks = tuple(self._cleanup_tasks)
+            await asyncio.shield(asyncio.gather(*tasks, return_exceptions=True))
+
+    def _schedule_trim_sessions(self) -> None:
+        async def trim() -> None:
+            async with self._lock:
+                evicted = self._trim_sessions_unlocked()
+            await self._close_sessions_tracked(evicted)
+
+        task = asyncio.create_task(trim(), name="samchon-graph:lru-trim")
+        self._track_cleanup_task(task)
 
     async def _get_session_unlocked(self, cwd: str) -> _SamchonGraphSession:
         existing = self._sessions.get(cwd)
@@ -368,26 +474,45 @@ class SamchonGraphClient:
         session = _SamchonGraphSession(self.config, cwd)
         try:
             self._graph_tool(await session.discover())
-        except Exception:
-            await session.close()
+        except BaseException as startup_error:  # preserve cancellation
+            try:
+                await session.abort()
+            except BaseException as cleanup_error:  # noqa: BLE001 - preserve original
+                _LOG.warning(
+                    "Samchon Graph startup cleanup failed after %r",
+                    startup_error,
+                    exc_info=(
+                        type(cleanup_error),
+                        cleanup_error,
+                        cleanup_error.__traceback__,
+                    ),
+                )
+            finally:
+                # abort() has a bounded wait; keep any late owner cleanup visible
+                # to client.close() rather than orphaning the unregistered task.
+                if session._task is not None:
+                    self._track_cleanup_task(session._task)
             raise
+        session._on_activity_finished = self._schedule_trim_sessions
         self._sessions[cwd] = session
         self._sessions.move_to_end(cwd)
-        await self._trim_sessions_unlocked(protected=cwd)
         return session
 
     async def describe(self) -> types.Tool:
         cwd = self.resolve_cwd(self.config.samchon_graph_schema_cwd)
         async with self._lock:
             session = await self._get_session_unlocked(cwd)
-            return self.public_tool(self._graph_tool(await session.discover()))
+            public = self.public_tool(self._graph_tool(await session.discover()))
+            evicted = self._trim_sessions_unlocked(protected=cwd)
+        await self._close_sessions_tracked(evicted)
+        return public
 
     async def healthy(self) -> bool:
         cwd = self.resolve_cwd(self.config.samchon_graph_schema_cwd)
         session = self._sessions.get(cwd)
         if session is None:
             return False
-        if session.active_calls:
+        if self._session_has_active_work(session):
             return True
         try:
             self._graph_tool(await session.discover())
@@ -401,19 +526,22 @@ class SamchonGraphClient:
         async with self._lock:
             session = await self._get_session_unlocked(cwd)
             session.active_calls += 1
+            evicted = self._trim_sessions_unlocked(protected=cwd)
         try:
+            await self._close_sessions_tracked(evicted)
             return await session.call(payload)
         finally:
             async with self._lock:
                 session.active_calls -= 1
-                await self._trim_sessions_unlocked()
+                evicted = self._trim_sessions_unlocked()
+            await self._close_sessions_tracked(evicted)
 
     async def close(self) -> None:
         async with self._lock:
             sessions = list(self._sessions.values())
             self._sessions.clear()
-            for session in sessions:
-                await session.close()
+        await self._close_sessions_tracked(sessions)
+        await self._wait_for_cleanup()
 
 
 class HermesToolsClient:
