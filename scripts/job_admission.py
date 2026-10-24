@@ -12,12 +12,12 @@ import hashlib
 import json
 import math
 import os
-from pathlib import Path
 import re
 import sqlite3
 import stat
 import sys
 import time
+from pathlib import Path
 from typing import cast
 
 ACTIVE = frozenset({"starting", "running", "unknown"})

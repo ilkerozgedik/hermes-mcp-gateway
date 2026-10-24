@@ -1,7 +1,11 @@
 import unittest
 from unittest.mock import ANY, patch
 
-from hermes_mcp_gateway.config import DIRECT_HERMES_TOOLS, DIRECT_HERMES_TOOLSETS, GatewayConfig
+from hermes_mcp_gateway.config import (
+    DIRECT_HERMES_TOOLS,
+    DIRECT_HERMES_TOOLSETS,
+    GatewayConfig,
+)
 from hermes_mcp_gateway.upstreams import HermesToolsClient
 
 
@@ -127,13 +131,15 @@ class DirectHermesToolTests(unittest.IsolatedAsyncioTestCase):
             (),
             {"task_id": "default", "session_key": "chatgpt:session-b"},
         )()
-        with patch("tools.process_registry.process_registry.get", return_value=foreign):
-            with self.assertRaisesRegex(PermissionError, "another MCP session"):
-                await client.call_direct(
-                    "process_manage",
-                    {"action": "kill", "session_id": "proc_foreign"},
-                    task_id="chatgpt:session-a",
-                )
+        with (
+            patch('tools.process_registry.process_registry.get', return_value=foreign),
+            self.assertRaisesRegex(PermissionError, 'another MCP session'),
+        ):
+            await client.call_direct(
+                "process_manage",
+                {"action": "kill", "session_id": "proc_foreign"},
+                task_id="chatgpt:session-a",
+            )
 
     async def test_process_operation_accepts_same_mcp_session_key(self):
         client = HermesToolsClient(GatewayConfig())
@@ -142,15 +148,15 @@ class DirectHermesToolTests(unittest.IsolatedAsyncioTestCase):
             (),
             {"task_id": "default", "session_key": "chatgpt:session-a"},
         )()
-        with patch("tools.process_registry.process_registry.get", return_value=owned):
-            with patch(
-                "model_tools.handle_function_call", return_value='{"status":"running"}'
-            ):
-                result = await client.call_direct(
-                    "process_manage",
-                    {"action": "poll", "session_id": "proc_owned"},
-                    task_id="chatgpt:session-a",
-                )
+        with (
+            patch('tools.process_registry.process_registry.get', return_value=owned),
+            patch('model_tools.handle_function_call', return_value='{"status":"running"}'),
+        ):
+            result = await client.call_direct(
+                "process_manage",
+                {"action": "poll", "session_id": "proc_owned"},
+                task_id="chatgpt:session-a",
+            )
         self.assertEqual(result.content[0].text, '{"status":"running"}')
 
     async def test_process_manage_operations_cannot_cross_mcp_sessions(self):
@@ -160,13 +166,15 @@ class DirectHermesToolTests(unittest.IsolatedAsyncioTestCase):
             (),
             {"task_id": "default", "session_key": "chatgpt:session-b"},
         )()
-        with patch("tools.process_registry.process_registry.get", return_value=foreign):
-            with self.assertRaisesRegex(PermissionError, "another MCP session"):
-                await client.call_direct(
-                    "process_manage",
-                    {"action": "kill", "session_id": "proc_foreign"},
-                    task_id="chatgpt:session-a",
-                )
+        with (
+            patch('tools.process_registry.process_registry.get', return_value=foreign),
+            self.assertRaisesRegex(PermissionError, 'another MCP session'),
+        ):
+            await client.call_direct(
+                "process_manage",
+                {"action": "kill", "session_id": "proc_foreign"},
+                task_id="chatgpt:session-a",
+            )
 
     def test_discover_direct_tools_preserves_process_manage_name(self):
         definitions = [

@@ -1,6 +1,7 @@
 """Image discovery must not depend on an OAuth credential's temporary cooldown."""
 
 import json
+import tempfile
 import unittest
 from unittest.mock import AsyncMock, patch
 
@@ -10,6 +11,7 @@ from hermes_mcp_gateway.config import (
     HERMES_REQUIRED,
     SAMCHON_GRAPH_TOOL,
     WEB_TOOLS,
+    GatewayConfig,
 )
 from hermes_mcp_gateway.server import (
     CatalogEntry,
@@ -27,7 +29,9 @@ def tool(name):
 
 class DeferredImageTests(unittest.IsolatedAsyncioTestCase):
     async def test_cooldown_does_not_break_startup_or_hide_image_tool(self):
-        gateway = Gateway()
+        state = self.enterContext(tempfile.TemporaryDirectory())
+        gateway = Gateway(GatewayConfig(job_state_dir=state))
+        self.addAsyncCleanup(gateway.close)
         gateway.hermes.start = AsyncMock()
         gateway.hermes.call = AsyncMock()
         gateway.hermes.discover = AsyncMock(

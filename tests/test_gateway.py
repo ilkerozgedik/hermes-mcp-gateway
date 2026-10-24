@@ -728,6 +728,7 @@ class WebReadinessProbeTests(unittest.IsolatedAsyncioTestCase):
     async def test_web_refresh_uses_provider_budget_not_local_health_budget(self):
         import asyncio
         from dataclasses import replace
+
         from hermes_mcp_gateway.config import GatewayConfig
         from hermes_mcp_gateway.server import Gateway
 
@@ -746,6 +747,7 @@ class WebReadinessProbeTests(unittest.IsolatedAsyncioTestCase):
     async def test_web_refresh_still_fails_closed_on_provider_deadline(self):
         import asyncio
         from dataclasses import replace
+
         from hermes_mcp_gateway.config import GatewayConfig
         from hermes_mcp_gateway.server import Gateway
 
@@ -817,10 +819,14 @@ class WebReadinessProbeTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await gateway.probe_web_tools())
 
     async def test_start_does_not_duplicate_failed_web_probe(self):
-        from hermes_mcp_gateway.config import IMAGE_TOOLS
+        import tempfile
+
+        from hermes_mcp_gateway.config import IMAGE_TOOLS, GatewayConfig
         from hermes_mcp_gateway.server import Gateway
 
-        gateway = Gateway()
+        state = self.enterContext(tempfile.TemporaryDirectory())
+        gateway = Gateway(GatewayConfig(job_state_dir=state))
+        self.addAsyncCleanup(gateway.close)
         gateway.hermes.start = AsyncMock()
         gateway.hermes.discover = AsyncMock(
             return_value=[

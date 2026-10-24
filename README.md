@@ -47,6 +47,13 @@ Gateway-owned startup tool:
 
 - `startup_context` — reads only the four fixed Hermes startup files (`.hermes.md`, `SOUL.md`, `MEMORY.md`, and `USER.md`). It accepts no path and is not a generic filesystem surface.
 
+Startup readiness performs the same bounded, no-follow read as the tool, including
+UTF-8 and serialized-output validation. Both content and the JSON envelope must
+fit their configured budgets; an oversized envelope fails explicitly rather than
+returning a successful but cut JSON document. The read-only LSP stdio entrypoint
+also redacts sensitive text and bounds output; oversized results carry a valid
+JSON truncation receipt.
+
 Memory tools are:
 
 - `memory_profile` (read-only)
@@ -217,6 +224,10 @@ The narrow upstream-supported activation path is:
 Hermes may advertise the `web_search`/`web_extract` schemas as soon as the managed backend is selected, even before Nous authentication is usable. The gateway therefore performs one real `web_search` and one real `web_extract` smoke call at startup and treats nested provider errors as not-ready. `/readyz` becomes `200` only when those calls succeed; otherwise the process stays degraded and tunnel cutover is forbidden. Provider/auth changes require a gateway restart so readiness and the MCP schema remain stable for the process lifetime.
 
 ## Tests
+
+Startup tests use temporary job-state directories and close their background
+maintenance tasks. Never point test fixtures or staging listeners at the live
+job database; `test_startup_state_isolation.py` guards this boundary.
 
 ```bash
 PYTHONPATH=src:/srv/agents/src/hermes-agent \

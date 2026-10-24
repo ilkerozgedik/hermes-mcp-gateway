@@ -70,10 +70,10 @@ class CronCapabilityTests(unittest.IsolatedAsyncioTestCase):
         schemas = {tool.name: tool for tool in capability_tool_schemas()}
         self.assertIn("cronjob", schemas)
         props = schemas["cronjob"].input_schema["properties"]
-        for forbidden in {
+        for forbidden in (
             "model", "provider", "base_url", "script", "no_agent",
             "monitor_script", "monitor_url", "enabled_toolsets",
-        }:
+        ):
             self.assertNotIn(forbidden, props)
         self.assertNotIn("confirmed", props)
 
@@ -148,7 +148,7 @@ class DelegationCapabilityTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("delegate_task", schemas)
         props = schemas["delegate_task"].input_schema["properties"]
         self.assertEqual(props["tasks"]["maxItems"], 2)
-        for forbidden in {"background", "role", "max_iterations", "action", "subagent_id"}:
+        for forbidden in ("background", "role", "max_iterations", "action", "subagent_id"):
             self.assertNotIn(forbidden, props)
         self.assertNotIn("confirmed", props)
 

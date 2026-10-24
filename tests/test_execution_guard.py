@@ -1,5 +1,4 @@
 """Fail-closed Gateway guard for ad hoc command execution."""
-import json
 import unittest
 from unittest.mock import AsyncMock
 

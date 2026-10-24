@@ -2,12 +2,12 @@
 import hashlib
 import json
 import os
-from pathlib import Path
 import sqlite3
 import subprocess
 import sys
 import tempfile
 import unittest
+from pathlib import Path
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "job_admission.py"
 OWNER_A = "a" * 32
@@ -31,7 +31,7 @@ class AdmissionControlTests(unittest.TestCase):
             command.extend(("--owner-token", owner))
         command.extend(extra)
         return subprocess.run(
-            command, capture_output=True, text=True, timeout=5,
+            command, capture_output=True, text=True, timeout=5, check=False,
             env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
         )
 
@@ -171,7 +171,7 @@ class AdmissionControlTests(unittest.TestCase):
         rejected_source = subprocess.run(
             [sys.executable, str(SCRIPT), "snapshot", "--database", str(source),
              "--destination", str(safe_copy)],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True, text=True, timeout=5, check=False,
             env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
         )
         self.assertEqual(rejected_source.returncode, 2)

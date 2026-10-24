@@ -9,7 +9,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
-from pathlib import Path
 import shlex
 import sqlite3
 import subprocess
@@ -17,6 +16,7 @@ import sys
 import tempfile
 import time
 import uuid
+from pathlib import Path
 
 import httpx
 from e2e_native import PROTOCOL, rpc, text

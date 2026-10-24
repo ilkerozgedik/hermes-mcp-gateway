@@ -15,7 +15,6 @@ from typing import Any
 
 import httpx
 import uvicorn
-from agent.redact import redact_sensitive_text
 from mcp import types
 from mcp.server.lowlevel import Server
 from starlette.requests import Request
@@ -40,6 +39,7 @@ from .jobs import ResumableJobs, job_tool_schemas
 from .lsp import LSPAdapter, lsp_tool_schemas
 from .memory import MemoryAdapter, memory_tool_schemas
 from .native_activity import NativeCalls
+from .output import _sanitize_structure, error_result, normalize_result
 from .sessions import (
     SESSION_TOKEN_TTL_SECONDS,
     SessionCapability,
@@ -162,21 +162,6 @@ def build_catalog(
     return catalog
 
 
-def _sanitize_structure(value: Any) -> Any:
-    if isinstance(value, str):
-        return redact_sensitive_text(value, force=True)
-    if isinstance(value, dict):
-        return {
-            redact_sensitive_text(str(key), force=True): _sanitize_structure(item)
-            for key, item in value.items()
-        }
-    if isinstance(value, (list, tuple)):
-        return [_sanitize_structure(item) for item in value]
-    if value is None or isinstance(value, (bool, int, float)):
-        return value
-    return redact_sensitive_text(str(value), force=True)
-
-
 def _structured_read_file_result(
     result: types.CallToolResult, *, limit: int
 ) -> types.CallToolResult:
@@ -241,52 +226,6 @@ def _structured_read_file_result(
     )
 
 
-def normalize_result(
-    result: types.CallToolResult, *, limit: int, preserve_images: bool = False
-) -> types.CallToolResult:
-    content: list[Any] = []
-    for item in result.content:
-        if isinstance(item, types.TextContent):
-            text = redact_sensitive_text(item.text, force=True)
-            if len(text) > limit:
-                suffix = "\n...[truncated by hermes-mcp-gateway]"
-                text = text[: max(0, limit - len(suffix))] + suffix
-            content.append(types.TextContent(text=text))
-        elif preserve_images and isinstance(item, types.ImageContent):
-            content.append(item)
-        else:
-            marker = (
-                f"[{type(item).__name__} omitted by hermes-mcp-gateway output policy]"
-            )
-            content.append(types.TextContent(text=marker[:limit]))
-    structured = result.structured_content
-    if structured is not None:
-        structured = _sanitize_structure(structured)
-        rendered = json.dumps(structured, ensure_ascii=False, default=str)
-        if len(rendered) > limit:
-            structured = {
-                "truncated": True,
-                "preview": rendered[: max(0, limit - 64)],
-            }
-    return types.CallToolResult(
-        content=content, structured_content=structured, is_error=result.is_error
-    )
-
-
-def error_result(
-    message: str, *, limit: int, category: str | None = None
-) -> types.CallToolResult:
-    text = redact_sensitive_text(str(message), force=True)
-    if len(text) > limit:
-        text = text[:limit]
-    metadata = {"_gateway_error_category": category} if category else None
-    return types.CallToolResult(
-        content=[types.TextContent(text=text)],
-        structured_content=metadata,
-        is_error=True,
-    )
-
-
 class Gateway:
     def __init__(self, config: GatewayConfig | None = None):
         self.config = config or GatewayConfig()
@@ -304,7 +243,10 @@ class Gateway:
             timeout=self.config.timeout_seconds,
         )
         self.capabilities = HermesCapabilities(native_calls=self.native_calls)
-        self.startup = StartupContext(max_total_bytes=self.config.max_startup_bytes)
+        self.startup = StartupContext(
+            max_total_bytes=self.config.max_startup_bytes,
+            max_output_chars=self.config.max_text_chars,
+        )
         self.catalog: dict[str, CatalogEntry] = {}
         self.discovery: ToolDiscovery | None = None
         self.missing_final_tools: set[str] = set()

@@ -46,3 +46,32 @@ class LSPStdioTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(result.is_error)
         self.assertIn("outside allowed roots", result.content[0].text)
+
+    async def test_redacts_sensitive_values_in_result_and_error(self) -> None:
+        secret = "sk-proj-FAKE-DEMO-123456789"
+        self.adapter.call.return_value = {"result": {"contents": "OPENAI_API_KEY=" + secret}}
+        result = await self.call_tool(
+            None, types.CallToolRequestParams(name="lsp_hover", arguments={})
+        )
+        item = result.content[0]
+        assert isinstance(item, types.TextContent)
+        self.assertNotIn(secret, item.text)
+        self.assertIn("contents", json.loads(item.text)["result"])
+        self.adapter.call.side_effect = RuntimeError("OPENAI_API_KEY=" + secret)
+        result = await self.call_tool(
+            None, types.CallToolRequestParams(name="lsp_hover", arguments={})
+        )
+        self.assertTrue(result.is_error)
+        item = result.content[0]
+        assert isinstance(item, types.TextContent)
+        self.assertNotIn(secret, item.text)
+
+    async def test_large_result_stays_bounded_valid_json(self) -> None:
+        self.adapter.call.return_value = {"contents": ('quote"\\\n' * 20_000)}
+        result = await self.call_tool(
+            None, types.CallToolRequestParams(name="lsp_hover", arguments={})
+        )
+        item = result.content[0]
+        assert isinstance(item, types.TextContent)
+        self.assertLessEqual(len(item.text), 65_536)
+        self.assertTrue(json.loads(item.text)["truncated"])

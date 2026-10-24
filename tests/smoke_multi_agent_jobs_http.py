@@ -2,6 +2,7 @@
 import argparse
 import asyncio
 import json
+import sys
 import tempfile
 import uuid
 from pathlib import Path
@@ -84,8 +85,8 @@ async def main():
                             "job_id": item["job_id"],
                             "recovery_token": item["recovery_token"],
                         }, sessions[3])
-                    except Exception:
-                        pass
+                    except Exception:  # noqa: BLE001 - preserve the original smoke failure during cleanup
+                        print("Warning: smoke job cleanup failed; reconcile its receipt.", file=sys.stderr)
 
 
 if __name__ == "__main__":
