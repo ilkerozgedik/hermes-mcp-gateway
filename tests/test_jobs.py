@@ -4,9 +4,10 @@ import json
 import os
 import sqlite3
 import tempfile
+import threading
 import unittest
 from pathlib import Path
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 from mcp import types
 
@@ -344,6 +345,96 @@ class JobTests(unittest.IsolatedAsyncioTestCase):
             columns = {row[1] for row in db.execute("PRAGMA table_info(jobs)")}
         self.assertIn("owner_hash", columns)
         self.assertIn("workdir", columns)
+
+    def test_concurrent_legacy_schema_migrations_serialize_and_reread_schema(self):
+        self.jobs.path.unlink()
+        with sqlite3.connect(self.jobs.path) as db:
+            db.execute("""CREATE TABLE jobs (job_id TEXT PRIMARY KEY, credential_hash TEXT NOT NULL,
+                request_hash TEXT NOT NULL, idempotency_hash TEXT UNIQUE, native_id TEXT,
+                state TEXT NOT NULL, created REAL NOT NULL, deadline REAL NOT NULL,
+                updated REAL NOT NULL, exit_code INTEGER, output TEXT NOT NULL DEFAULT '')""")
+            db.execute("""INSERT INTO jobs VALUES ('job_legacy','hashed','fingerprint',NULL,
+                'proc_legacy','succeeded',1,2,3,0,'retained')""")
+
+        first_read = threading.Event()
+        second_ready = threading.Event()
+        errors = []
+        instances = []
+        results_lock = threading.Lock()
+        real_connect = sqlite3.connect
+
+        class BufferedRows(sqlite3.Cursor):
+            def __init__(self, connection, rows):
+                super().__init__(connection)
+                self.rows = iter(rows)
+
+            def __iter__(self):
+                return self.rows
+
+        class GatedConnection(sqlite3.Connection):
+            def execute(self, sql, parameters=()):
+                normalized = " ".join(sql.upper().split())
+                thread_name = threading.current_thread().name
+                if normalized == "PRAGMA TABLE_INFO(JOBS)":
+                    rows = super().execute(sql, parameters).fetchall()
+                    if thread_name == "migration-first":
+                        first_read.set()
+                        if not second_ready.wait(timeout=5):
+                            raise AssertionError("second migration never reached its schema decision")
+                    elif thread_name == "migration-second":
+                        second_ready.set()
+                    return BufferedRows(self, rows)
+                if thread_name == "migration-second" and normalized == "BEGIN IMMEDIATE":
+                    # In the fixed implementation, this fires before SQLite blocks
+                    # the second initializer behind the first writer transaction.
+                    second_ready.set()
+                return super().execute(sql, parameters)
+
+        def gated_connect(*args, **kwargs):
+            kwargs["factory"] = GatedConnection
+            return real_connect(*args, **kwargs)
+
+        def initialize():
+            try:
+                instance = ResumableJobs(
+                    self.hermes, Path(self.workdir), allowed_roots=(self.workdir,),
+                )
+                with results_lock:
+                    instances.append(instance)
+            except BaseException as exc:
+                with results_lock:
+                    errors.append(exc)
+
+        first = threading.Thread(target=initialize, name="migration-first")
+        second = threading.Thread(target=initialize, name="migration-second")
+        with patch.object(sqlite3, "connect", side_effect=gated_connect):
+            try:
+                first.start()
+                self.assertTrue(first_read.wait(timeout=2), "first migration did not inspect the legacy schema")
+                second.start()
+                first.join(timeout=7)
+                second.join(timeout=7)
+            finally:
+                second_ready.set()
+                first.join(timeout=1)
+                second.join(timeout=1)
+
+        self.assertFalse(first.is_alive(), "first migration thread did not finish")
+        self.assertFalse(second.is_alive(), "second migration thread did not finish")
+        self.assertEqual(errors, [])
+        self.assertEqual(len(instances), 2)
+        with sqlite3.connect(self.jobs.path) as db:
+            columns = {row[1] for row in db.execute("PRAGMA table_info(jobs)")}
+            receipt = db.execute(
+                "SELECT state, output FROM jobs WHERE job_id='job_legacy'",
+            ).fetchone()
+            settings = db.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='gateway_settings'",
+            ).fetchone()
+        self.assertTrue({"owner_hash", "workdir", "prepared_command",
+                         "prepared_max_runtime", "prepared_expires"} <= columns)
+        self.assertEqual(receipt, ("succeeded", "retained"))
+        self.assertIsNotNone(settings)
 
     async def prepare(self, command="printf okay", workdir=None, *, caller_id="session-a", **extra):
         return await self.jobs.call("job_prepare", {

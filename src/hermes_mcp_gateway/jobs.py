@@ -95,6 +95,7 @@ class ResumableJobs:
             raise ValueError("invalid prepared_ttl")
         self._job_locks: WeakValueDictionary[str, asyncio.Lock] = WeakValueDictionary()
         with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
             db.execute("""CREATE TABLE IF NOT EXISTS jobs (
                 job_id TEXT PRIMARY KEY,
                 credential_hash TEXT NOT NULL,
