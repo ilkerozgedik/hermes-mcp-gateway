@@ -33,15 +33,18 @@ async def main():
         timed = await invoke("terminal", {"command": "python3 -c 'import time; time.sleep(4)'", "timeout": 1}, session)
         timed_data = json.loads(text(timed))
         assert timed_data.get("exit_code") not in (None, 0), timed_data.get("status")
-        job = await invoke("job_start", {
+        prepared = await invoke("job_prepare", {
             "command": "printf recoverable-job-ok",
             "workdir": args.workdir,
             "idempotency_key": "execution-guard-http-" + uuid.uuid4().hex,
             "max_runtime": 60,
         }, session)
+        assert not prepared.get("isError"), text(prepared)
+        receipt = json.loads(text(prepared))
+        credential = {"job_id": receipt["job_id"], "recovery_token": receipt["recovery_token"]}
+        job = await invoke("job_start", credential, session)
         assert not job.get("isError"), text(job)
-        receipt = json.loads(text(job))
-        assert receipt["state"] == "running" and receipt["recovery_token"]
+        assert json.loads(text(job))["state"] == "running"
         lease2 = await invoke("session_open", {})
         session2 = json.loads(text(lease2))["session_token"]
         status = {"state": "running", "exit_code": None}

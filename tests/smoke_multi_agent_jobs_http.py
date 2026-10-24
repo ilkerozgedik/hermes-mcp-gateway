@@ -32,15 +32,21 @@ async def main():
                 d.mkdir()
 
             async def start(i, session):
-                result = await tool("job_start", {
+                prepared = await tool("job_prepare", {
                     "command": "python3 -c 'import time; time.sleep(15); print(42)'",
                     "workdir": str(dirs[i]),
                     "max_runtime": 90,
                     "idempotency_key": "multi-agent-smoke-" + uuid.uuid4().hex,
                 }, session)
+                if prepared.get("isError"):
+                    return prepared
+                receipt = json.loads(text(prepared))
+                result = await tool("job_start", {
+                    "job_id": receipt["job_id"], "recovery_token": receipt["recovery_token"],
+                }, session)
                 if result.get("isError"):
                     return result
-                return json.loads(text(result))
+                return {**receipt, **json.loads(text(result))}
 
             try:
                 first = await asyncio.gather(start(0, sessions[0]), start(1, sessions[0]))
