@@ -5,6 +5,7 @@ import json
 import logging
 import unittest
 from types import SimpleNamespace
+from typing import Any, cast
 from unittest.mock import AsyncMock, patch
 
 from mcp import types
@@ -272,7 +273,7 @@ class RequestTelemetryTests(unittest.IsolatedAsyncioTestCase):
         response = await healthz(None)
         self.assertEqual(
             json.loads(response.body),
-            {"status": "ok", "inflight_requests": 1},
+            {"status": "ok", "inflight_requests": 1, "inflight_native_calls": 0},
         )
         gateway.health.assert_not_awaited()
 
@@ -321,8 +322,19 @@ class RequestTelemetryTests(unittest.IsolatedAsyncioTestCase):
                 call_params("web_search", {"query": "another private query"}),
             )
         safe_output = "\n".join(safe_log.output)
-        self.assertIn("correlation_id=safe-id:42", safe_output)
+        self.assertIn("correlation_id=sha256:", safe_output)
+        self.assertNotIn("safe-id:42", safe_output)
         self.assertNotIn("another private query", safe_output)
+
+    async def test_request_id_cannot_echo_a_recovery_token_to_logs(self):
+        gateway = self.make_gateway()
+        gateway.hermes.call = AsyncMock(return_value=types.CallToolResult(content=[types.TextContent(text="ok")]))
+        app = cast(Any, captured_app(gateway))
+        with self.assertLogs("hermes_mcp_gateway", level=logging.INFO) as captured:
+            await app.handler(request_context({"x-request-id": RECOVERY_TOKEN}), call_params("web_search", {"query": "x"}))
+        output = "\n".join(captured.output)
+        self.assertNotIn(RECOVERY_TOKEN, output)
+        self.assertIn("correlation_id=sha256:", output)
 
     async def test_timeout_is_logged_as_timeout_not_tool_error(self):
         gateway = self.make_gateway()

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from copy import deepcopy
 import json
 import logging
@@ -38,6 +39,7 @@ from .execution_guard import guard_terminal
 from .jobs import ResumableJobs, job_tool_schemas
 from .lsp import LSPAdapter, lsp_tool_schemas
 from .memory import MemoryAdapter, memory_tool_schemas
+from .native_activity import NativeCalls
 from .sessions import (
     SESSION_TOKEN_TTL_SECONDS,
     SessionCapability,
@@ -289,7 +291,8 @@ class Gateway:
     def __init__(self, config: GatewayConfig | None = None):
         self.config = config or GatewayConfig()
         self.execution = NativeExecution(self.config)
-        self.hermes = HermesToolsClient(self.config)
+        self.native_calls = NativeCalls()
+        self.hermes = HermesToolsClient(self.config, native_calls=self.native_calls)
         self.graph = SamchonGraphClient(self.config)
         self.lsp = LSPAdapter(
             allowed_roots=self.config.samchon_graph_allowed_roots,
@@ -300,7 +303,7 @@ class Gateway:
             session_id=self.config.memory_session,
             timeout=self.config.timeout_seconds,
         )
-        self.capabilities = HermesCapabilities()
+        self.capabilities = HermesCapabilities(native_calls=self.native_calls)
         self.startup = StartupContext(max_total_bytes=self.config.max_startup_bytes)
         self.catalog: dict[str, CatalogEntry] = {}
         self.discovery: ToolDiscovery | None = None
@@ -467,7 +470,7 @@ class Gateway:
         await self.execution.close()
         await self.hermes.close()
         await self.graph.close()
-        await asyncio.to_thread(self.lsp.close)
+        await self.native_calls.run(self.lsp.close)
 
     async def _cleanup_session_owner(self, task_id: str) -> None:
         """Clean only resources keyed by this gateway-generated owner ID."""
@@ -481,19 +484,19 @@ class Gateway:
             )
 
         try:
-            await asyncio.to_thread(kill_owned_processes)
+            await self.native_calls.run(kill_owned_processes)
         except Exception:  # noqa: BLE001 - cleanup must not break revocation
             logger.warning("Could not clean processes for a gateway session")
         try:
             from tools.terminal_tool_lifecycle import cleanup_vm
 
-            await asyncio.to_thread(cleanup_vm, task_id)
+            await self.native_calls.run(cleanup_vm, task_id)
         except Exception:  # noqa: BLE001 - do not retain a revoked owner's cwd/env
             logger.warning("Could not clean a gateway-owned terminal environment")
         try:
             from .upstreams import _reset_camofox_session
 
-            await asyncio.to_thread(_reset_camofox_session, task_id)
+            await self.native_calls.run(_reset_camofox_session, task_id)
         except Exception:  # noqa: BLE001 - local browser binding cleanup is best effort
             logger.warning("Could not drop a gateway-owned browser binding")
 
@@ -590,7 +593,7 @@ class Gateway:
                 if name == "execute_code":
                     result = await self.execution.call(arguments)
                 elif name == "image_generate" and self._deferred_image:
-                    result = await asyncio.to_thread(call_deferred_image, arguments)
+                    result = await self.native_calls.run(call_deferred_image, arguments)
                 elif name == "vision_analyze":
                     result = await self.hermes.call_vision(arguments)
                     preserve_images = True
@@ -622,7 +625,7 @@ class Gateway:
             elif entry.source == "graph":
                 result = await self.graph.call(arguments)
             elif entry.source == "lsp":
-                payload = await asyncio.to_thread(self.lsp.call, name, arguments)
+                payload = await self.native_calls.run(self.lsp.call, name, arguments)
                 result = types.CallToolResult(
                     content=[
                         types.TextContent(
@@ -642,7 +645,7 @@ class Gateway:
                             "startup_context does not accept arguments",
                             limit=self.config.max_text_chars,
                         )
-                    payload = await asyncio.to_thread(self.startup.read)
+                    payload = await self.native_calls.run(self.startup.read)
                 elif name in {"job_prepare", "job_start", "job_status", "job_cancel"}:
                     if self.jobs is None:
                         return error_result("job service not started", limit=self.config.max_text_chars)
@@ -834,7 +837,7 @@ def create_app(config: GatewayConfig | None = None):
         except Exception:  # noqa: BLE001 - correlation metadata is untrusted
             inbound_id = None
         correlation_id = (
-            inbound_id
+            "sha256:" + hashlib.sha256(inbound_id.encode()).hexdigest()[:16]
             if isinstance(inbound_id, str)
             and len(inbound_id) <= 64
             and re.fullmatch(r"[A-Za-z0-9._:-]{1,64}", inbound_id)
@@ -968,7 +971,8 @@ def create_app(config: GatewayConfig | None = None):
             "terminal and process continuity on modern sessionless MCP, discover and call "
             "session_open once, pass its returned session_token at the top level of every "
             "related tool_call, and use session_close when finished. For long commands, "
-            "save its one-time recovery_token, then call job_start with the prepared "
+            "call job_prepare first, securely save its one-time recovery_token before "
+            "starting work, then call job_start with the prepared "
             "job_id and recovery_token. job_prepare and job_start require a verified "
             "interactive session; renew an expired session with session_open before "
             "starting. Use job_status or job_cancel with the recovery credential from "
@@ -987,7 +991,8 @@ def create_app(config: GatewayConfig | None = None):
     async def healthz(_request: Request):
         # Liveness must not run upstream discovery, LSP, or paid web probes.
         return JSONResponse(
-            {"status": "ok", "inflight_requests": gateway.inflight_requests}
+            {"status": "ok", "inflight_requests": gateway.inflight_requests,
+             "inflight_native_calls": gateway.native_calls.active_count}
         )
 
     async def readyz(_request: Request):

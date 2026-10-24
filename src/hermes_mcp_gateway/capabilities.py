@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-import asyncio
 import json
 from typing import Any
 
 from mcp import types
 from tools.cronjob_tools import cronjob
 from tools.session_search_tool import session_search
+from .native_activity import NativeCalls
 
 _SESSION_ALLOWED = frozenset(
     {
@@ -169,6 +169,9 @@ CAPABILITY_TOOLS = frozenset(tool.name for tool in capability_tool_schemas())
 
 
 class HermesCapabilities:
+    def __init__(self, *, native_calls: NativeCalls | None = None):
+        self.native_calls = native_calls or NativeCalls()
+
     def check(self) -> bool:
         try:
             from cron.scheduler import create_job_with_scheduler_registration
@@ -193,7 +196,7 @@ class HermesCapabilities:
     async def _session_search(self, arguments: dict[str, Any]) -> types.CallToolResult:
         if rejected := _reject_unknown(arguments, _SESSION_ALLOWED):
             return rejected
-        payload = await asyncio.to_thread(
+        payload = await self.native_calls.run(
             session_search,
             query=arguments.get("query") or "",
             role_filter=arguments.get("role_filter"),
@@ -243,7 +246,7 @@ class HermesCapabilities:
         if rejected := _reject_unknown(arguments, _CRON_ALLOWED):
             return rejected
         action = str(arguments.get("action") or "").strip().lower()
-        payload = await asyncio.to_thread(
+        payload = await self.native_calls.run(
             cronjob,
             action=action,
             job_id=arguments.get("job_id"),

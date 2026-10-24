@@ -12,6 +12,7 @@ from uuid import uuid4
 
 from mcp import ClientSession, StdioServerParameters, types
 from mcp.client.stdio import stdio_client
+from .native_activity import NativeCalls
 
 from .config import (
     DIRECT_HERMES_TOOLS,
@@ -416,8 +417,9 @@ class SamchonGraphClient:
 
 
 class HermesToolsClient:
-    def __init__(self, config: GatewayConfig):
+    def __init__(self, config: GatewayConfig, *, native_calls: NativeCalls | None = None):
         self.config = config
+        self.native_calls = native_calls or NativeCalls()
         self._stack: AsyncExitStack | None = None
         self._session: ClientSession | None = None
 
@@ -498,7 +500,7 @@ class HermesToolsClient:
         assert self._session is not None
         upstream, direct = await asyncio.gather(
             self._session.list_tools(),
-            asyncio.to_thread(self._discover_direct_tools),
+            self.native_calls.run(self._discover_direct_tools),
         )
         merged = {tool.name: tool for tool in upstream.tools}
         for tool in direct:
@@ -559,7 +561,7 @@ class HermesToolsClient:
             finally:
                 clear_session_vars(tokens)
 
-        value = await asyncio.to_thread(dispatch)
+        value = await self.native_calls.run(dispatch)
         if not isinstance(value, str):
             raise TypeError(f"Hermes tool {name} returned unsupported result type")
         return types.CallToolResult(content=[types.TextContent(text=value)])
@@ -571,7 +573,7 @@ class HermesToolsClient:
         # native handler, so this path has no claimed Gateway-wide deadline.
         from model_tools import handle_function_call
 
-        value = await asyncio.to_thread(
+        value = await self.native_calls.run(
             handle_function_call,
             name,
             arguments,
@@ -591,7 +593,7 @@ class HermesToolsClient:
         if _browser_result_is_stale(value):
             _reset_camofox_session(task_id)
             if name == "browser_navigate":
-                value = await asyncio.to_thread(
+                value = await self.native_calls.run(
                     handle_function_call,
                     name,
                     arguments,
@@ -608,7 +610,7 @@ class HermesToolsClient:
         # cancellable from asyncio; keep its deadline owned by the native client.
         from model_tools import handle_function_call
 
-        value = await asyncio.to_thread(
+        value = await self.native_calls.run(
             handle_function_call, "vision_analyze", arguments, tool_call_id=uuid4().hex
         )
         return _vision_value_to_result(value)

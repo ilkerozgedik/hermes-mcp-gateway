@@ -1,7 +1,7 @@
 import unittest
 from unittest.mock import ANY, patch
 
-from hermes_mcp_gateway.config import DIRECT_HERMES_TOOLS, DIRECT_HERMES_TOOLSETS
+from hermes_mcp_gateway.config import DIRECT_HERMES_TOOLS, DIRECT_HERMES_TOOLSETS, GatewayConfig
 from hermes_mcp_gateway.upstreams import HermesToolsClient
 
 
@@ -22,7 +22,7 @@ class DirectHermesToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(DIRECT_HERMES_TOOLSETS, ("file", "terminal", "video"))
 
     async def test_direct_dispatch_is_request_scoped(self):
-        client = object.__new__(HermesToolsClient)
+        client = HermesToolsClient(GatewayConfig())
         with patch(
             "model_tools.handle_function_call", return_value='{"success":true}'
         ) as dispatch:
@@ -44,7 +44,7 @@ class DirectHermesToolTests(unittest.IsolatedAsyncioTestCase):
     async def test_concurrent_direct_calls_have_distinct_hook_call_ids(self):
         import asyncio
 
-        client = object.__new__(HermesToolsClient)
+        client = HermesToolsClient(GatewayConfig())
         with patch(
             "model_tools.handle_function_call", return_value='{"success":true}'
         ) as dispatch:
@@ -74,7 +74,7 @@ class DirectHermesToolTests(unittest.IsolatedAsyncioTestCase):
     ):
         from gateway.session_context import get_session_env
 
-        client = object.__new__(HermesToolsClient)
+        client = HermesToolsClient(GatewayConfig())
         before = get_session_env("HERMES_SESSION_KEY", "")
         seen = []
 
@@ -97,7 +97,7 @@ class DirectHermesToolTests(unittest.IsolatedAsyncioTestCase):
 
         from gateway.session_context import get_session_env
 
-        client = object.__new__(HermesToolsClient)
+        client = HermesToolsClient(GatewayConfig())
         barrier = threading.Barrier(2)
         seen = []
 
@@ -121,7 +121,7 @@ class DirectHermesToolTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_process_operations_cannot_cross_mcp_sessions(self):
-        client = object.__new__(HermesToolsClient)
+        client = HermesToolsClient(GatewayConfig())
         foreign = type(
             "Session",
             (),
@@ -136,7 +136,7 @@ class DirectHermesToolTests(unittest.IsolatedAsyncioTestCase):
                 )
 
     async def test_process_operation_accepts_same_mcp_session_key(self):
-        client = object.__new__(HermesToolsClient)
+        client = HermesToolsClient(GatewayConfig())
         owned = type(
             "Session",
             (),
@@ -154,7 +154,7 @@ class DirectHermesToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.content[0].text, '{"status":"running"}')
 
     async def test_process_manage_operations_cannot_cross_mcp_sessions(self):
-        client = object.__new__(HermesToolsClient)
+        client = HermesToolsClient(GatewayConfig())
         foreign = type(
             "Session",
             (),

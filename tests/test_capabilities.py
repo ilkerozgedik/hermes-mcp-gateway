@@ -155,7 +155,7 @@ class DelegationCapabilityTests(unittest.IsolatedAsyncioTestCase):
     async def test_delegate_fails_fast_without_starting_model_inference(self):
         capabilities = HermesCapabilities()
         with patch(
-            "hermes_mcp_gateway.capabilities.asyncio.to_thread",
+            "hermes_mcp_gateway.capabilities.NativeCalls.run",
             new_callable=AsyncMock,
         ) as to_thread:
             result = await capabilities.call("delegate_task", {"goal": "Research auth design"})
@@ -167,7 +167,7 @@ class DelegationCapabilityTests(unittest.IsolatedAsyncioTestCase):
     async def test_delegate_legacy_confirmation_is_not_a_supported_argument(self):
         capabilities = HermesCapabilities()
         with patch(
-            "hermes_mcp_gateway.capabilities.asyncio.to_thread",
+            "hermes_mcp_gateway.capabilities.NativeCalls.run",
             new_callable=AsyncMock,
         ) as to_thread:
             result = await capabilities.call('delegate_task', {'goal': 'Research auth design', 'confirmed': True})
@@ -177,7 +177,7 @@ class DelegationCapabilityTests(unittest.IsolatedAsyncioTestCase):
     async def test_delegate_batch_fails_fast_without_starting_model_inference(self):
         capabilities = HermesCapabilities()
         with patch(
-            "hermes_mcp_gateway.capabilities.asyncio.to_thread",
+            "hermes_mcp_gateway.capabilities.NativeCalls.run",
             new_callable=AsyncMock,
         ) as to_thread:
             result = await capabilities.call(
