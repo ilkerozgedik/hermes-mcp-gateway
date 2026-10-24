@@ -157,8 +157,6 @@ class JobTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(receipt["exit_code"], 23)
 
     def test_database_contains_only_hashed_job_credentials(self):
-        import sqlite3
-        import os
         self.assertEqual(os.stat(self.jobs.path).st_mode & 0o777, 0o600)
         with sqlite3.connect(self.jobs.path) as db:
             self.assertTrue(db.execute("SELECT name FROM sqlite_master WHERE name='jobs'").fetchone())
@@ -401,7 +399,7 @@ class JobTests(unittest.IsolatedAsyncioTestCase):
                 )
                 with results_lock:
                     instances.append(instance)
-            except BaseException as exc:
+            except Exception as exc:  # noqa: BLE001 - surface worker failures to the main test thread.
                 with results_lock:
                     errors.append(exc)
 
@@ -432,7 +430,8 @@ class JobTests(unittest.IsolatedAsyncioTestCase):
                 "SELECT name FROM sqlite_master WHERE type='table' AND name='gateway_settings'",
             ).fetchone()
         self.assertTrue({"owner_hash", "workdir", "prepared_command",
-                         "prepared_max_runtime", "prepared_expires"} <= columns)
+                         "prepared_max_runtime", "prepared_expires",
+                         "timeout_requested"} <= columns)
         self.assertEqual(receipt, ("succeeded", "retained"))
         self.assertIsNotNone(settings)
 
@@ -752,6 +751,113 @@ class JobTests(unittest.IsolatedAsyncioTestCase):
             "job_id": receipt["job_id"], "recovery_token": receipt["recovery_token"],
         })
         self.assertEqual(state["state"], "running")
+
+    async def _assert_delayed_start_write_cannot_overwrite_cancel(
+        self, cancel_adapter, late_behavior="success",
+    ):
+        prepared = await self.prepare()
+        launch_entered = asyncio.Event()
+        release_launch = asyncio.Event()
+
+        async def delayed_launch(name, args, *, task_id):
+            if name == "terminal":
+                launch_entered.set()
+                await release_launch.wait()
+                if late_behavior == "error":
+                    raise RuntimeError("delayed launch acknowledgement failed")
+                return tool_reply(self.outcome)
+            action = args.get("action")
+            if action == "list":
+                return tool_reply({"processes": [{"session_id": "proc_1234"}]})
+            if action == "kill":
+                return tool_reply({"success": True})
+            if action == "poll":
+                return tool_reply({
+                    "status": "killed", "exit_code": -15,
+                    "completion_reason": "killed", "termination_source": "process.kill",
+                })
+            raise AssertionError((name, args))
+
+        self.hermes.call_direct.side_effect = delayed_launch
+        launch = asyncio.create_task(self.start_prepared(prepared))
+        try:
+            await asyncio.wait_for(launch_entered.wait(), timeout=1)
+            cancelled = await asyncio.wait_for(cancel_adapter.call("job_cancel", {
+                "job_id": prepared["job_id"], "recovery_token": prepared["recovery_token"],
+            }), timeout=1)
+            self.assertEqual(cancelled["state"], "cancelled")
+            if late_behavior == "cancel":
+                launch.cancel()
+        finally:
+            release_launch.set()
+        if late_behavior == "cancel":
+            with self.assertRaises(asyncio.CancelledError):
+                await launch
+        else:
+            started = await launch
+            self.assertEqual(started["state"], "cancelled")
+        self.assertEqual(self.jobs._get(prepared["job_id"])[5], "cancelled")
+
+    async def test_delayed_start_ack_does_not_overwrite_cancel(self):
+        await self._assert_delayed_start_write_cannot_overwrite_cancel(self.jobs)
+
+    async def test_cross_adapter_cancel_wins_over_delayed_start_ack(self):
+        second = ResumableJobs(self.hermes, Path(self.temp.name), allowed_roots=(self.temp.name,))
+        await self._assert_delayed_start_write_cannot_overwrite_cancel(second)
+
+    async def test_delayed_start_error_does_not_overwrite_cancel(self):
+        await self._assert_delayed_start_write_cannot_overwrite_cancel(
+            self.jobs, late_behavior="error",
+        )
+
+    async def test_cancelled_start_does_not_overwrite_job_cancel(self):
+        await self._assert_delayed_start_write_cannot_overwrite_cancel(
+            self.jobs, late_behavior="cancel",
+        )
+
+    async def test_timeout_intent_survives_deferred_observation_restart_status_and_cancel(self):
+        receipt = await self.launch({"command": "sleep 1", "workdir": self.workdir})
+        self.jobs._set_deadline_for_test(receipt["job_id"], 0)
+        observe_killed = False
+
+        async def delayed_kill_observation(name, args, *, task_id):
+            action = args.get("action")
+            if action == "poll":
+                if observe_killed:
+                    return tool_reply({
+                        "status": "killed", "exit_code": -15,
+                        "completion_reason": "killed", "termination_source": "process.kill",
+                    })
+                return tool_reply({"status": "running"})
+            if action == "kill":
+                return tool_reply({"success": True})
+            raise AssertionError((name, args))
+
+        self.hermes.call_direct.side_effect = delayed_kill_observation
+        await self.jobs.maintain()
+        row = self.jobs._get(receipt["job_id"])
+        self.assertEqual(row[5], "running")
+        self.assertEqual(row[16], 1)
+
+        restarted = ResumableJobs(self.hermes, Path(self.temp.name), allowed_roots=(self.temp.name,))
+        status = await restarted.call("job_status", {
+            "job_id": receipt["job_id"], "recovery_token": receipt["recovery_token"],
+        })
+        self.assertEqual(status["state"], "running")
+        self.assertEqual(restarted._get(receipt["job_id"])[16], 1)
+        cancellation = await restarted.call("job_cancel", {
+            "job_id": receipt["job_id"], "recovery_token": receipt["recovery_token"],
+        })
+        self.assertEqual(cancellation["state"], "running")
+        self.assertEqual(restarted._get(receipt["job_id"])[16], 1)
+
+        observe_killed = True
+        await restarted.maintain()
+        final = await restarted.call("job_status", {
+            "job_id": receipt["job_id"], "recovery_token": receipt["recovery_token"],
+        })
+        self.assertEqual(final["state"], "timed_out")
+        self.assertEqual(restarted._get(receipt["job_id"])[16], 1)
 
     async def test_missing_exit_code_is_not_fabricated_as_failure(self):
         receipt = await self.launch({"command": "printf guarded", "workdir": self.workdir})

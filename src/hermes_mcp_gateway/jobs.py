@@ -17,8 +17,8 @@ import time
 from pathlib import Path
 from weakref import WeakValueDictionary
 
-from mcp import types
 from agent.redact import redact_sensitive_text
+from mcp import types
 
 ACTIVE = ("starting", "running", "unknown")
 FINAL = ("succeeded", "failed", "cancelled", "timed_out", "expired")
@@ -112,7 +112,8 @@ class ResumableJobs:
                 workdir TEXT,
                 prepared_command TEXT,
                 prepared_max_runtime INTEGER,
-                prepared_expires REAL
+                prepared_expires REAL,
+                timeout_requested INTEGER NOT NULL DEFAULT 0
             )""")
             columns = {row[1] for row in db.execute("PRAGMA table_info(jobs)")}
             for column, declaration in (
@@ -121,6 +122,7 @@ class ResumableJobs:
                 ("prepared_command", "TEXT"),
                 ("prepared_max_runtime", "INTEGER"),
                 ("prepared_expires", "REAL"),
+                ("timeout_requested", "INTEGER NOT NULL DEFAULT 0"),
             ):
                 if column not in columns:
                     db.execute(f"ALTER TABLE jobs ADD COLUMN {column} {declaration}")
@@ -146,7 +148,8 @@ class ResumableJobs:
             return db.execute(
                 "SELECT job_id, credential_hash, request_hash, idempotency_hash, "
                 "native_id, state, created, deadline, updated, exit_code, output, "
-                "owner_hash, workdir, prepared_command, prepared_max_runtime, prepared_expires "
+                "owner_hash, workdir, prepared_command, prepared_max_runtime, prepared_expires, "
+                "timeout_requested "
                 "FROM jobs WHERE job_id=?", (job_id,),
             ).fetchone()
 
@@ -170,7 +173,7 @@ class ResumableJobs:
         return row
 
     def _update(self, job_id, state, *, native_id=_UNSET, exit_code=_UNSET, output=_UNSET,
-                clear_prepared=False):
+                clear_prepared=False, expected_states=None):
         fields = ["state=?", "updated=?"]
         values = [state, time.time()]
         if native_id is not _UNSET:
@@ -185,8 +188,25 @@ class ResumableJobs:
         if clear_prepared:
             fields.append("prepared_command=NULL")
         values.append(job_id)
+        where = "job_id=?"
+        if expected_states:
+            where += " AND state IN (" + ",".join("?" for _ in expected_states) + ")"
+            values.extend(expected_states)
         with self._connect() as db:
-            db.execute(f"UPDATE jobs SET {', '.join(fields)} WHERE job_id=?", values)
+            changed = db.execute(
+                f"UPDATE jobs SET {', '.join(fields)} WHERE {where}", values,
+            ).rowcount
+        return changed == 1
+
+    def _request_timeout(self, job_id):
+        """Persist timeout intent before asking Hermes to terminate the process."""
+        with self._connect() as db:
+            changed = db.execute(
+                "UPDATE jobs SET timeout_requested=1, updated=? WHERE job_id=? "
+                "AND state IN ('starting','running','unknown')",
+                (time.time(), job_id),
+            ).rowcount
+        return changed == 1
 
     def _set_deadline_for_test(self, job_id, deadline):
         with self._connect() as db:
@@ -340,7 +360,7 @@ class ResumableJobs:
             row = db.execute(
                 "SELECT job_id, credential_hash, request_hash, idempotency_hash, native_id, "
                 "state, created, deadline, updated, exit_code, output, owner_hash, workdir, "
-                "prepared_command, prepared_max_runtime, prepared_expires "
+                "prepared_command, prepared_max_runtime, prepared_expires, timeout_requested "
                 "FROM jobs WHERE job_id=?", (job_id,),
             ).fetchone()
             if not row or not hmac.compare_digest(row[1], expected):
@@ -349,7 +369,8 @@ class ResumableJobs:
                 return self._start_existing(row)
             if row[15] is None or row[15] <= now:
                 db.execute(
-                    "UPDATE jobs SET state='expired', prepared_command=NULL, updated=? WHERE job_id=?",
+                    "UPDATE jobs SET state='expired', prepared_command=NULL, updated=? "
+                    "WHERE job_id=? AND state='prepared'",
                     (now, job_id),
                 )
                 return {"job_id": job_id, "state": "expired", "replayed": True}
@@ -391,7 +412,7 @@ class ResumableJobs:
             # Recheck immediately before dispatching native work.
             path = self._revalidate_workdir(path)
         except ValueError:
-            self._update(job_id, "failed", clear_prepared=True)
+            self._update(job_id, "failed", clear_prepared=True, expected_states=("starting",))
             raise
         try:
             native = await asyncio.wait_for(
@@ -406,14 +427,17 @@ class ResumableJobs:
             native_id = native.get("session_id")
             if not isinstance(native_id, str) or not native_id.startswith("proc_"):
                 raise RuntimeError("native terminal returned no process handle")
-            self._update(job_id, "running", native_id=native_id)
-            state = "running"
+            self._update(job_id, "running", native_id=native_id,
+                         expected_states=("starting",))
+            current = self._get(job_id)
+            state = current[5] if current else "unknown"
         except asyncio.CancelledError:
-            self._update(job_id, "unknown")
+            self._update(job_id, "unknown", expected_states=("starting",))
             raise
-        except Exception:
-            self._update(job_id, "unknown")
-            state = "unknown"
+        except Exception:  # noqa: BLE001 - native launch/ack failures are ambiguous and quarantined.
+            self._update(job_id, "unknown", expected_states=("starting",))
+            current = self._get(job_id)
+            state = current[5] if current else "unknown"
         return {"job_id": job_id, "state": state, "max_runtime": duration,
                 "replayed": False}
 
@@ -425,11 +449,14 @@ class ResumableJobs:
             )
             for proc in native.get("processes", []):
                 ident = proc.get("session_id") if isinstance(proc, dict) else None
-                if isinstance(ident, str) and ident.startswith("proc_"):
-                    self._update(job_id, "running", native_id=ident)
+                if (
+                    isinstance(ident, str)
+                    and ident.startswith("proc_")
+                    and self._update(job_id, "running", native_id=ident, expected_states=ACTIVE)
+                ):
                     return ident
-        except Exception:
-            pass
+        except Exception:  # noqa: BLE001 - scoped native discovery is best-effort; absence stays quarantined.
+            return None
         return None
 
     async def _poll(self, job_id, native_id, last_output=""):
@@ -449,7 +476,8 @@ class ResumableJobs:
             state = "running"
         elif raw_state in ("exited", "completed", "killed", "cancelled"):
             if explicitly_killed:
-                state = "cancelled"
+                row = self._get(job_id)
+                state = "timed_out" if row and row[16] else "cancelled"
             elif type(exit_code) is int:
                 state = "succeeded" if exit_code == 0 else "failed"
             else:
@@ -459,7 +487,11 @@ class ResumableJobs:
         value = native.get("output", native.get("output_preview", ""))
         output = (redact_sensitive_text(value[-MAX_OUTPUT:], force=True)
                   if isinstance(value, str) and value else last_output)
-        self._update(job_id, state, exit_code=exit_code, output=output)
+        if not self._update(job_id, state, exit_code=exit_code, output=output,
+                            expected_states=ACTIVE):
+            current = self._get(job_id)
+            if current and current[5] in FINAL:
+                state, exit_code, output = current[5], current[9], current[10]
         return state, exit_code, output
 
     async def status(self, args):
@@ -468,21 +500,35 @@ class ResumableJobs:
             job_id, _, _, _, native_id, state, created, deadline, _, exit_code, output = row[:11]
             expires = row[15]
             if state == "prepared" and (expires is None or expires <= time.time()):
-                self._update(job_id, "expired", clear_prepared=True)
-                state = "expired"
+                if self._update(job_id, "expired", clear_prepared=True,
+                                expected_states=("prepared",)):
+                    state = "expired"
+                else:
+                    current = self._get(job_id)
+                    if current:
+                        native_id, state = current[4], current[5]
+                        created, deadline = current[6], current[7]
+                        exit_code, output, expires = current[9], current[10], current[15]
+                    else:
+                        state = "unknown"
             elif state == "prepared":
                 return {"job_id": job_id, "state": state, "exit_code": exit_code,
                         "created": created, "deadline": deadline, "output": output[-MAX_OUTPUT:]}
             if state in ("starting", "unknown") and not native_id:
                 native_id = await self._adopt(job_id)
-                if native_id:
-                    state = "running"
+                current = self._get(job_id)
+                if current:
+                    state, native_id = current[5], current[4] or native_id
+                    exit_code, output = current[9], current[10]
             if state in ("running", "unknown") and native_id:
                 try:
                     state, exit_code, output = await self._poll(job_id, native_id, output)
-                except Exception:
+                except Exception:  # noqa: BLE001 - native poll failures must leave an active job quarantined.
                     state = "unknown"
-                    self._update(job_id, state)
+                    if not self._update(job_id, state, expected_states=ACTIVE):
+                        current = self._get(job_id)
+                        if current and current[5] in FINAL:
+                            state, exit_code, output = current[5], current[9], current[10]
             return {"job_id": job_id, "state": state, "exit_code": exit_code,
                     "created": created, "deadline": deadline, "output": output[-MAX_OUTPUT:]}
 
@@ -491,25 +537,37 @@ class ResumableJobs:
             row = self._authorized(args)
             job_id, native_id, state = row[0], row[4], row[5]
             if state == "prepared":
-                self._update(job_id, "cancelled", clear_prepared=True)
-                return {"job_id": job_id, "state": "cancelled"}
+                if self._update(job_id, "cancelled", clear_prepared=True,
+                                expected_states=("prepared",)):
+                    return {"job_id": job_id, "state": "cancelled"}
+                current = self._get(job_id)
+                if not current:
+                    return {"job_id": job_id, "state": "unknown"}
+                native_id, state = current[4], current[5]
             if state in FINAL:
                 return {"job_id": job_id, "state": state}
             if state in ("starting", "unknown") and not native_id:
                 native_id = await self._adopt(job_id)
-                if native_id:
-                    state = "running"
+                current = self._get(job_id)
+                if current:
+                    state, native_id = current[5], current[4] or native_id
+            if state in FINAL:
+                return {"job_id": job_id, "state": state}
             if not native_id:
-                self._update(job_id, "unknown")
-                return {"job_id": job_id, "state": "unknown"}
+                if self._update(job_id, "unknown", expected_states=ACTIVE):
+                    return {"job_id": job_id, "state": "unknown"}
+                current = self._get(job_id)
+                return {"job_id": job_id, "state": current[5] if current else "unknown"}
             try:
                 await asyncio.wait_for(self._native("process_manage", {
                     "action": "kill", "session_id": native_id,
                 }, job_id), timeout=NATIVE_TIMEOUT)
                 state, _, _ = await self._poll(job_id, native_id, row[10])
-            except Exception:
-                self._update(job_id, "unknown")
-                return {"job_id": job_id, "state": "unknown"}
+            except Exception:  # noqa: BLE001 - native kill/poll failures remain ambiguous, not terminal.
+                if self._update(job_id, "unknown", expected_states=ACTIVE):
+                    return {"job_id": job_id, "state": "unknown"}
+                current = self._get(job_id)
+                return {"job_id": job_id, "state": current[5] if current else "unknown"}
             return {"job_id": job_id, "state": state}
 
     async def _maintain_one(self, job_id, deadline, last_output, updated, now):
@@ -525,7 +583,7 @@ class ResumableJobs:
                 native_id = await self._adopt(job_id)
             if not native_id:
                 if current[5] == "starting" and now - updated >= 60:
-                    self._update(job_id, "unknown")
+                    self._update(job_id, "unknown", expected_states=("starting",))
                 # Unknown without a verifiably terminal process remains an
                 # admission/workspace quarantine regardless of its deadline.
                 return
@@ -533,14 +591,14 @@ class ResumableJobs:
                 state, _, _ = await self._poll(job_id, native_id, last_output)
                 if state != "running" or deadline >= now:
                     return
+                if not self._request_timeout(job_id):
+                    return
                 await asyncio.wait_for(self._native("process_manage", {
                     "action": "kill", "session_id": native_id,
                 }, job_id), timeout=NATIVE_TIMEOUT)
                 state, _, _ = await self._poll(job_id, native_id, last_output)
-                if state == "cancelled":
-                    self._update(job_id, "timed_out")
-            except Exception:
-                self._update(job_id, "unknown")
+            except Exception:  # noqa: BLE001 - ambiguous reaper calls remain active/quarantined.
+                self._update(job_id, "unknown", expected_states=ACTIVE)
 
     async def maintain(self):
         now = time.time()
