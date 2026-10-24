@@ -14,6 +14,15 @@ def result_text(result: types.CallToolResult) -> str:
 
 
 class JsonOutputTests(unittest.TestCase):
+    def test_lone_surrogates_remain_utf8_serializable(self):
+        for limit in (100, 1024):
+            with self.subTest(limit=limit):
+                result = json_result({"value": "\ud800x\udfff" * 30}, limit=limit)
+                wire = result.model_dump_json()
+                wire.encode("utf-8")
+                self.assertLessEqual(len(result_text(result)), limit)
+                json.loads(result_text(result))
+
     def test_nested_sensitive_values_are_redacted_before_serialization(self):
         secret = "sk-proj-FAKE-DEMO-123456789"
         result = json_result({"items": [{"value": "OPENAI_API_KEY=" + secret}]}, limit=1024)

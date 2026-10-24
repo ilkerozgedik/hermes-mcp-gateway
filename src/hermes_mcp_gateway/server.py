@@ -416,7 +416,7 @@ class Gateway:
             await self.native_calls.wait_idle()
             cleanup_tasks = tuple(self._session_cleanup_tasks)
             if cleanup_tasks:
-                await asyncio.gather(*cleanup_tasks, return_exceptions=True)
+                await asyncio.shield(asyncio.gather(*cleanup_tasks, return_exceptions=True))
         await self.execution.close()
         await self.hermes.close()
         await self.graph.close()
@@ -453,25 +453,29 @@ class Gateway:
     async def _cleanup_session_records(
         self, records: list[SessionCapability]
     ) -> None:
-        for record in records:
-            try:
-                await self._cleanup_session_owner(record.task_id)
-            finally:
-                self.session_capabilities.cleanup_complete(record)
+        # Schedule every revoked owner before yielding. Cancellation of the
+        # reaper/request/shutdown waiter must not abandon any claimed cleanup.
+        tasks = [self._start_session_cleanup(record) for record in records]
+        if tasks:
+            await asyncio.shield(asyncio.gather(*tasks))
 
-    def _release_native_session_token(self, lease: SessionCapability) -> None:
-        cleanup = self.session_capabilities.release(lease)
-        if cleanup is None:
-            return
-        # Native completion callbacks run in the request's Context. Owner cleanup
-        # must not inherit that lease or recursively retain the revoked owner.
+    def _start_session_cleanup(self, record: SessionCapability) -> asyncio.Task[None]:
+        async def finish() -> None:
+            await self._cleanup_session_owner(record.task_id)
+            self.session_capabilities.cleanup_complete(record)
+
+        # Do not inherit a request's native owner lease into owner cleanup.
         task = asyncio.create_task(
-            self._cleanup_session_records([cleanup]),
-            name=f"gateway-session-cleanup:{cleanup.task_id}",
-            context=Context(),
+            finish(), name=f"gateway-session-cleanup:{record.task_id}", context=Context()
         )
         self._session_cleanup_tasks.add(task)
         task.add_done_callback(self._session_cleanup_finished)
+        return task
+
+    def _release_native_session_token(self, lease: SessionCapability) -> None:
+        cleanup = self.session_capabilities.release(lease)
+        if cleanup is not None:
+            self._start_session_cleanup(cleanup)
 
     def _session_cleanup_finished(self, task: asyncio.Task[None]) -> None:
         self._session_cleanup_tasks.discard(task)

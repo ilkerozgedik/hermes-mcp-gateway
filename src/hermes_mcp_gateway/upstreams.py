@@ -136,6 +136,7 @@ class _SamchonGraphSession:
         ) = None
         self._task: asyncio.Task[None] | None = None
         self._failure: Exception | None = None
+        self._closed = False
         self._pending_operations = 0
         self._on_activity_finished: Any = None
 
@@ -246,6 +247,8 @@ class _SamchonGraphSession:
                     response.set_exception(failure)
 
     async def _start_unlocked(self) -> None:
+        if self._closed:
+            raise RuntimeError("Samchon Graph session is closed")
         if self._task is not None and not self._task.done():
             return
         loop = asyncio.get_running_loop()
@@ -294,6 +297,7 @@ class _SamchonGraphSession:
     async def close(self) -> None:
         loop = asyncio.get_running_loop()
         async with self._lifecycle_lock:
+            self._closed = True
             task = self._task
             queue = self._queue
             if task is None:
@@ -310,6 +314,7 @@ class _SamchonGraphSession:
     async def abort(self) -> None:
         """Cancel a failed or abandoned startup and bound the owner-task wait."""
         async with self._lifecycle_lock:
+            self._closed = True
             task = self._task
             if task is None:
                 return
@@ -333,6 +338,7 @@ class SamchonGraphClient:
         self._sessions: OrderedDict[str, _SamchonGraphSession] = OrderedDict()
         self._lock = asyncio.Lock()
         self._cleanup_tasks: set[asyncio.Task[Any]] = set()
+        self._closed = False
 
     @staticmethod
     def public_tool(upstream: types.Tool) -> types.Tool:
@@ -457,8 +463,12 @@ class SamchonGraphClient:
             await asyncio.shield(asyncio.gather(*tasks, return_exceptions=True))
 
     def _schedule_trim_sessions(self) -> None:
+        if self._closed:
+            return
         async def trim() -> None:
             async with self._lock:
+                if self._closed:
+                    return
                 evicted = self._trim_sessions_unlocked()
             await self._close_sessions_tracked(evicted)
 
@@ -466,6 +476,8 @@ class SamchonGraphClient:
         self._track_cleanup_task(task)
 
     async def _get_session_unlocked(self, cwd: str) -> _SamchonGraphSession:
+        if self._closed:
+            raise RuntimeError("Samchon Graph client is closed")
         existing = self._sessions.get(cwd)
         if existing is not None:
             self._sessions.move_to_end(cwd)
@@ -504,6 +516,8 @@ class SamchonGraphClient:
         return public
 
     async def healthy(self) -> bool:
+        if self._closed:
+            return False
         cwd = self.resolve_cwd(self.config.samchon_graph_schema_cwd)
         session = self._sessions.get(cwd)
         if session is None:
@@ -534,6 +548,7 @@ class SamchonGraphClient:
 
     async def close(self) -> None:
         async with self._lock:
+            self._closed = True
             sessions = list(self._sessions.values())
             self._sessions.clear()
         await self._close_sessions_tracked(sessions)

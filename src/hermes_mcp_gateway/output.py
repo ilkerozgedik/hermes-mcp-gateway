@@ -74,10 +74,11 @@ def error_result(
 
 def json_result(payload: Any, *, limit: int) -> types.CallToolResult:
     """Redact before serialization and keep truncated JSON syntactically valid."""
-    rendered = json.dumps(_sanitize_structure(payload), ensure_ascii=False, default=str)
+    # Keep lone surrogates escaped so the outer MCP serializer emits valid UTF-8.
+    rendered = json.dumps(_sanitize_structure(payload), ensure_ascii=True, default=str)
     if len(rendered) > limit:
         def envelope(size: int) -> str:
-            return json.dumps({"truncated": True, "preview": rendered[:size]}, ensure_ascii=False)
+            return json.dumps({"truncated": True, "preview": rendered[:size]}, ensure_ascii=True)
 
         low, high = 0, min(len(rendered), limit)
         if len(envelope(0)) > limit:

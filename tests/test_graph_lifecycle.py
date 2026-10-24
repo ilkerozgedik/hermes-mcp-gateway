@@ -97,6 +97,40 @@ class GraphHarness:
 
 
 class SamchonGraphLifecycleTests(unittest.IsolatedAsyncioTestCase):
+    async def test_shutdown_prevents_admitted_replacement_from_restarting_session(self):
+        with TemporaryDirectory() as root_a, TemporaryDirectory() as root_b:
+            client = SamchonGraphClient(GatewayConfig(
+                samchon_graph_allowed_roots=(root_a, root_b),
+                samchon_graph_schema_cwd=root_a,
+                samchon_graph_max_sessions=1,
+            ))
+            harness = GraphHarness([root_a, root_b], slow_close_root=root_a)
+            stdio_patch, session_patch = self._patch_mcp(harness)
+            with stdio_patch, session_patch:
+                await client.describe()
+                replacement = asyncio.create_task(client.call({"cwd": root_b}))
+                closing = None
+                try:
+                    await asyncio.wait_for(harness.close_started.wait(), timeout=1)
+                    closing = asyncio.create_task(client.close())
+                    for context in harness.contexts[root_b]:
+                        await asyncio.wait_for(context.exited.wait(), timeout=1)
+                    harness.release_close.set()
+                    await asyncio.wait_for(closing, timeout=2)
+                    with self.assertRaisesRegex(RuntimeError, "closed"):
+                        await replacement
+                    self.assertEqual(client._sessions, {})
+                    with self.assertRaisesRegex(RuntimeError, "closed"):
+                        await client.call({"cwd": root_a})
+                    self.assertFalse(any(
+                        task.get_name().startswith("samchon-graph:") and not task.done()
+                        for task in asyncio.all_tasks()
+                    ))
+                finally:
+                    harness.release_close.set()
+                    await asyncio.gather(replacement, *([closing] if closing else []), return_exceptions=True)
+                    await client.close()
+
     async def test_cleanup_logs_never_echo_upstream_error_payloads(self):
         client = SamchonGraphClient(GatewayConfig())
         async def failed_cleanup():
