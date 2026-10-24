@@ -654,5 +654,21 @@ class JobTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("value TEXT NOT NULL", settings)
         self.assertTrue({"prepared_command", "prepared_max_runtime", "prepared_expires"} <= columns)
 
+    async def test_kill_request_does_not_finalize_a_process_still_reported_running(self):
+        receipt = await self.launch({"command": "printf guarded", "workdir": self.workdir})
+        self.poll_outcome = {"status": "running", "termination_source": "process.kill"}
+        state = await self.jobs.call("job_status", {
+            "job_id": receipt["job_id"], "recovery_token": receipt["recovery_token"],
+        })
+        self.assertEqual(state["state"], "running")
+
+    async def test_missing_exit_code_is_not_fabricated_as_failure(self):
+        receipt = await self.launch({"command": "printf guarded", "workdir": self.workdir})
+        self.poll_outcome = {"status": "exited", "exit_code": None}
+        state = await self.jobs.call("job_status", {
+            "job_id": receipt["job_id"], "recovery_token": receipt["recovery_token"],
+        })
+        self.assertEqual(state["state"], "unknown")
+
     def test_catalog_contains_job_tools(self):
         self.assertEqual({t.name for t in job_tool_schemas()}, {"job_prepare", "job_start", "job_status", "job_cancel"})

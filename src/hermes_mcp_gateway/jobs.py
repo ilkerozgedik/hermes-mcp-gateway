@@ -443,12 +443,16 @@ class ResumableJobs:
             or native.get("completion_reason") == "killed"
             or native.get("termination_source") == "process.kill"
         )
-        if explicitly_killed:
-            state = "cancelled"
-        elif raw_state in ("exited", "completed"):
-            state = "succeeded" if exit_code == 0 else "failed"
-        elif raw_state in ("running", "starting"):
+        if raw_state in ("running", "starting"):
+            # A termination request is not proof that the native process ended.
             state = "running"
+        elif raw_state in ("exited", "completed", "killed", "cancelled"):
+            if explicitly_killed:
+                state = "cancelled"
+            elif type(exit_code) is int:
+                state = "succeeded" if exit_code == 0 else "failed"
+            else:
+                state = "unknown"
         else:
             state = "unknown"
         value = native.get("output", native.get("output_preview", ""))
