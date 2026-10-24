@@ -28,7 +28,7 @@ class NativeCalls:
         """Wait for tracked worker tasks to finish; never cancel native work."""
         while self._tasks:
             tasks = tuple(self._tasks)
-            await asyncio.gather(*tasks, return_exceptions=True)
+            await asyncio.shield(asyncio.gather(*tasks, return_exceptions=True))
 
     def _finished(self, task: asyncio.Task) -> None:
         self._tasks.discard(task)

@@ -97,6 +97,17 @@ class GraphHarness:
 
 
 class SamchonGraphLifecycleTests(unittest.IsolatedAsyncioTestCase):
+    async def test_cleanup_logs_never_echo_upstream_error_payloads(self):
+        client = SamchonGraphClient(GatewayConfig())
+        async def failed_cleanup():
+            raise RuntimeError("private-graph-error-fixture")
+        with self.assertLogs("hermes_mcp_gateway.upstreams", level="ERROR") as logs:
+            task = client._track_cleanup_task(asyncio.create_task(failed_cleanup()))
+            await asyncio.gather(task, return_exceptions=True)
+            await asyncio.sleep(0)
+        self.assertNotIn("private-graph-error-fixture", "\n".join(logs.output))
+        self.assertIn("RuntimeError", "\n".join(logs.output))
+
     def _client(self, root, *, max_sessions=1):
         return SamchonGraphClient(
             GatewayConfig(

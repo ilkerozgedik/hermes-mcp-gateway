@@ -1,8 +1,8 @@
 """Cancellation must not hide native threads from deployment quiescence."""
 import asyncio
-from contextvars import ContextVar
 import threading
 import unittest
+from contextvars import ContextVar
 
 from hermes_mcp_gateway.native_activity import NativeCalls
 
@@ -16,6 +16,30 @@ async def until(predicate):
 
 
 class NativeActivityTests(unittest.IsolatedAsyncioTestCase):
+    async def test_cancelled_drain_does_not_cancel_or_hide_native_work(self):
+        calls = NativeCalls()
+        started, release = threading.Event(), threading.Event()
+        def blocking():
+            started.set()
+            release.wait(3)
+            return "finished"
+        request = asyncio.create_task(calls.run(blocking))
+        waiter = None
+        try:
+            await until(started.is_set)
+            waiter = asyncio.create_task(calls.wait_idle())
+            await asyncio.sleep(0)
+            waiter.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await waiter
+            self.assertEqual(calls.active_count, 1)
+            self.assertFalse(request.done())
+        finally:
+            release.set()
+            await request
+            await calls.wait_idle()
+        self.assertEqual(calls.active_count, 0)
+
     async def test_cancelled_waiter_keeps_actual_thread_counted_until_it_finishes(self):
         calls = NativeCalls()
         started, release = threading.Event(), threading.Event()
@@ -47,14 +71,21 @@ class NativeActivityTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_gateway_health_counts_a_cancelled_native_handler_until_thread_finishes(self):
         from unittest.mock import patch
+
+        from test_request_boundaries import (
+            call_params,
+            captured_app,
+            request_context,
+            tool,
+        )
+
         from hermes_mcp_gateway.server import Gateway, build_catalog
         from hermes_mcp_gateway.tool_discovery import ToolDiscovery
-        from test_request_boundaries import captured_app, request_context, call_params, tool
         gateway = Gateway()
         gateway.catalog = build_catalog([tool("read_file")], [], [])
         gateway.discovery = ToolDiscovery(gateway.catalog)
         app = captured_app(gateway)
-        handler = getattr(app, "handler")
+        handler = app.handler
         started, release = threading.Event(), threading.Event()
         def native(*_args, **_kwargs):
             started.set()
@@ -69,7 +100,7 @@ class NativeActivityTests(unittest.IsolatedAsyncioTestCase):
                     await request
                 self.assertEqual(gateway.inflight_requests, 0)
                 self.assertEqual(gateway.native_calls.active_count, 1)
-                endpoint = next(getattr(route, "endpoint") for route in app.routes if getattr(route, "path", None) == "/healthz")
+                endpoint = next(route.endpoint for route in app.routes if getattr(route, "path", None) == "/healthz")
                 import json
                 data = json.loads((await endpoint(None)).body)
                 self.assertEqual(data["inflight_requests"], 0)

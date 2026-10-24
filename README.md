@@ -95,6 +95,12 @@ Gateway cancellation does not forcibly kill thread-backed native handlers.
 Those handlers remain counted until actual completion, including after an HTTP
 disconnect. Long synchronous Gateway delegation is rejected before inference.
 
+Honcho workers share the same completion tracking, including after a memory
+timeout. A timed-out memory mutation reports `state=unknown`: an early readback
+that finds no record does not prove the original worker stopped, so never replay
+it before completion and reconciliation. Session-owned native work retains its
+owner lease until actual completion; revocation cleanup follows that completion.
+
 Request telemetry records generated request IDs, tool, elapsed time and result
 category. A validated inbound request ID is correlated by a truncated SHA256,
 not logged verbatim or used for authorization. Arguments, commands, recovery

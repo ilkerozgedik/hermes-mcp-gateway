@@ -430,8 +430,8 @@ class SamchonGraphClient:
         exception = task.exception()
         if exception is not None:
             _LOG.error(
-                "Samchon Graph cleanup task failed",
-                exc_info=(type(exception), exception, exception.__traceback__),
+                "Samchon Graph cleanup task failed error_type=%s",
+                type(exception).__name__,
             )
 
     def _schedule_close_sessions(
@@ -479,13 +479,9 @@ class SamchonGraphClient:
                 await session.abort()
             except BaseException as cleanup_error:  # noqa: BLE001 - preserve original
                 _LOG.warning(
-                    "Samchon Graph startup cleanup failed after %r",
-                    startup_error,
-                    exc_info=(
-                        type(cleanup_error),
-                        cleanup_error,
-                        cleanup_error.__traceback__,
-                    ),
+                    "Samchon Graph startup cleanup failed startup_type=%s cleanup_type=%s",
+                    type(startup_error).__name__,
+                    type(cleanup_error).__name__,
                 )
             finally:
                 # abort() has a bounded wait; keep any late owner cleanup visible

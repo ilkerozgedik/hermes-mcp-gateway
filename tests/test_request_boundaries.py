@@ -14,7 +14,6 @@ from hermes_mcp_gateway.server import Gateway, build_catalog, create_app
 from hermes_mcp_gateway.sessions import SessionCapabilityStore
 from hermes_mcp_gateway.tool_discovery import ToolDiscovery
 
-
 RECOVERY_TOKEN = "A" * 43
 JOB_ID = "job_0123456789abcdef0123456789abcdef"
 
