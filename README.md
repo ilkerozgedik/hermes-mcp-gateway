@@ -166,6 +166,12 @@ Original terminal calls are not resumable jobs.
 The local-only `scripts/job_admission.py` supports `status`, `drain`, `resume`
 and consistent SQLite `snapshot`. It is not exposed over MCP. Run it as the
 database owner, with `--database /home/hermes/.hermes/gateway-jobs.sqlite3`.
+`drain` and `resume` also require the same private `--owner-token` (32–128 safe
+characters). The gate claim is atomic, stores only the token's hash, and refuses
+to release another operator's pause; `status` never returns ownership tokens.
+Keep database and snapshot paths under trusted-owner directories without
+group/world write access. Unsafe parents and symlinks are rejected before
+SQLite opens either path.
 Draining pauses fresh starts atomically while recovery and authorized duplicate
 starts remain available. It waits for starting/running/unknown jobs; on timeout
 it fails closed and leaves admission paused for the deploy owner to restore.

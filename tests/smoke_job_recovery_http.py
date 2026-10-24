@@ -129,10 +129,12 @@ async def main():
                 assert marker.read_text().splitlines() == ["once"]
                 checks["one_real_native_execution"] = True
                 operator = Path(__file__).resolve().parents[1] / "scripts" / "job_admission.py"
+                gate_owner = uuid.uuid4().hex
 
                 def control(action):
+                    ownership = ["--owner-token", gate_owner] if action in {"drain", "resume"} else []
                     result = subprocess.run(
-                        [sys.executable, str(operator), action, "--database", str(database), "--timeout", "0"],
+                        [sys.executable, str(operator), action, "--database", str(database), "--timeout", "0", *ownership],
                         capture_output=True, text=True, check=True, timeout=5,
                     )
                     return json.loads(result.stdout)
