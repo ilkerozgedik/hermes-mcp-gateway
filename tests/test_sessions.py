@@ -14,6 +14,7 @@ class SessionCapabilityStoreTests(unittest.TestCase):
         self.assertIsNone(store.acquire("not-a-token"))
         lease = store.acquire(first_token)
         self.assertIsNotNone(lease)
+        assert lease is not None
         self.assertIs(lease, first)
         with self.assertRaisesRegex(RuntimeError, "capacity"):
             store.issue()
@@ -22,6 +23,11 @@ class SessionCapabilityStoreTests(unittest.TestCase):
         self.assertIsNone(store.acquire(first_token))
         cleanup = store.release(lease)
         self.assertIs(cleanup, first)
+        assert cleanup is not None
+        self.assertIn(first.task_id, store._by_owner)
+        with self.assertRaisesRegex(RuntimeError, "capacity"):
+            store.issue()
+        store.cleanup_complete(cleanup)
         second_token, second = store.issue()
         self.assertNotEqual(first_token, second_token)
         self.assertNotEqual(first.task_id, second.task_id)
@@ -37,6 +43,7 @@ class SessionCapabilityStoreTests(unittest.TestCase):
         store = SessionCapabilityStore(ttl_seconds=5, clock=lambda: now[0])
         token, record = store.issue()
         lease = store.acquire(token)
+        assert lease is not None
         now[0] = 14.999
         self.assertEqual(store.expire_due(), [])
         now[0] = 15.0
@@ -44,8 +51,32 @@ class SessionCapabilityStoreTests(unittest.TestCase):
         self.assertIsNone(store.acquire(token))
         cleanup = store.expire_due()
         self.assertEqual(cleanup, [])  # already revoked while its lease is active
-        self.assertIs(store.release(lease), record)
+        cleanup_record = store.release(lease)
+        self.assertIs(cleanup_record, record)
+        assert cleanup_record is not None
+        store.cleanup_complete(cleanup_record)
         self.assertEqual(store.expire_due(), [])
+
+    def test_retained_native_reference_keeps_revoked_owner_until_cleanup(self):
+        store = SessionCapabilityStore(max_active=1)
+        token, record = store.issue()
+        request_lease = store.acquire(token)
+        self.assertIs(request_lease, record)
+        assert request_lease is not None
+        store.retain(record)
+
+        self.assertIsNone(store.revoke(record))
+        self.assertIsNone(store.release(request_lease))
+        cleanup = store.release(record)
+        self.assertIs(cleanup, record)
+        self.assertEqual(record.active_calls, 0)
+        self.assertIn(record.task_id, store._by_owner)
+        with self.assertRaisesRegex(RuntimeError, "capacity"):
+            store.issue()
+
+        store.cleanup_complete(record)
+        self.assertNotIn(record.task_id, store._by_owner)
+        store.issue()
 
 
 class NativeSessionCleanupTests(unittest.IsolatedAsyncioTestCase):

@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-from copy import deepcopy
 import json
 import logging
 import re
 import secrets
 import time
 from contextlib import asynccontextmanager
+from contextvars import Context
+from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -241,6 +242,7 @@ class Gateway:
             ai_peer=self.config.memory_ai_peer,
             session_id=self.config.memory_session,
             timeout=self.config.timeout_seconds,
+            native_calls=self.native_calls,
         )
         self.capabilities = HermesCapabilities(native_calls=self.native_calls)
         self.startup = StartupContext(
@@ -259,6 +261,7 @@ class Gateway:
         self._job_reaper_task: asyncio.Task[None] | None = None
         self._session_reaper_task: asyncio.Task[None] | None = None
         self._inflight_requests = 0
+        self._session_cleanup_tasks: set[asyncio.Task[None]] = set()
 
     @property
     def inflight_requests(self) -> int:
@@ -409,6 +412,11 @@ class Gateway:
                 pass
             self._session_reaper_task = None
         await self._cleanup_session_records(self.session_capabilities.revoke_all())
+        while self.native_calls.active_count or self._session_cleanup_tasks:
+            await self.native_calls.wait_idle()
+            cleanup_tasks = tuple(self._session_cleanup_tasks)
+            if cleanup_tasks:
+                await asyncio.gather(*cleanup_tasks, return_exceptions=True)
         await self.execution.close()
         await self.hermes.close()
         await self.graph.close()
@@ -446,7 +454,30 @@ class Gateway:
         self, records: list[SessionCapability]
     ) -> None:
         for record in records:
-            await self._cleanup_session_owner(record.task_id)
+            try:
+                await self._cleanup_session_owner(record.task_id)
+            finally:
+                self.session_capabilities.cleanup_complete(record)
+
+    def _release_native_session_token(self, lease: SessionCapability) -> None:
+        cleanup = self.session_capabilities.release(lease)
+        if cleanup is None:
+            return
+        # Native completion callbacks run in the request's Context. Owner cleanup
+        # must not inherit that lease or recursively retain the revoked owner.
+        task = asyncio.create_task(
+            self._cleanup_session_records([cleanup]),
+            name=f"gateway-session-cleanup:{cleanup.task_id}",
+            context=Context(),
+        )
+        self._session_cleanup_tasks.add(task)
+        task.add_done_callback(self._session_cleanup_finished)
+
+    def _session_cleanup_finished(self, task: asyncio.Task[None]) -> None:
+        self._session_cleanup_tasks.discard(task)
+        if not task.cancelled():
+            # Cleanup is best effort and must not echo upstream diagnostics.
+            task.exception()
 
     async def _reap_jobs(self) -> None:
         while True:
@@ -862,6 +893,17 @@ def create_app(config: GatewayConfig | None = None):
                 else browser_task_id(_ctx)
             )
             try:
+                if lease is not None and selected_for_auth in STATEFUL_HERMES_TOOLS:
+                    with gateway.native_calls.owner_lease(
+                        retain=lambda: gateway.session_capabilities.retain(lease),
+                        release=lambda: gateway._release_native_session_token(lease),
+                    ):
+                        return await gateway.call(
+                            params.name,
+                            arguments,
+                            task_id=task_id,
+                            session_capability=lease,
+                        )
                 return await gateway.call(
                     params.name,
                     arguments,

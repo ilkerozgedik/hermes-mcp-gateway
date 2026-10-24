@@ -20,6 +20,7 @@ class SessionCapability:
     expires_at: float
     active_calls: int = 0
     revoked: bool = False
+    cleanup_started: bool = False
 
 
 class SessionCapabilityStore:
@@ -48,8 +49,8 @@ class SessionCapabilityStore:
         if not record.revoked:
             record.revoked = True
             self._by_digest.pop(record.token_digest, None)
-        if record.active_calls == 0:
-            self._by_owner.pop(record.task_id, None)
+        if record.active_calls == 0 and not record.cleanup_started:
+            record.cleanup_started = True
             return record
         return None
 
@@ -97,10 +98,25 @@ class SessionCapabilityStore:
         if record.active_calls <= 0:
             return None
         record.active_calls -= 1
-        if record.revoked and record.active_calls == 0:
-            self._by_owner.pop(record.task_id, None)
+        if record.revoked and record.active_calls == 0 and not record.cleanup_started:
+            record.cleanup_started = True
             return record
         return None
+
+    def retain(self, record: SessionCapability) -> None:
+        """Add a native-work reference while an existing request lease is alive."""
+        if (
+            self._by_owner.get(record.task_id) is not record
+            or record.active_calls <= 0
+            or record.cleanup_started
+        ):
+            raise RuntimeError("session capability lease is no longer active")
+        record.active_calls += 1
+
+    def cleanup_complete(self, record: SessionCapability) -> None:
+        """Free capacity only after best-effort owner cleanup has completed."""
+        if record.cleanup_started and record.active_calls == 0:
+            self._by_owner.pop(record.task_id, None)
 
     def revoke_all(self) -> list[SessionCapability]:
         cleanup = []

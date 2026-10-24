@@ -9,6 +9,8 @@ from typing import Any
 from agent.redact import redact_sensitive_text
 from mcp import types
 
+from .native_activity import NativeCalls
+
 
 def _load_honcho_components():
     """Load Honcho components through Hermes' plugin catalog API."""
@@ -103,10 +105,12 @@ class MemoryAdapter:
         ai_peer: str = "chatgpt",
         session_id: str = "chatgpt",
         timeout: float = 30.0,
+        native_calls: NativeCalls | None = None,
     ):
         self.ai_peer = ai_peer
         self.session_id = session_id
         self.timeout = timeout
+        self.native_calls = native_calls or NativeCalls()
         self.config: HonchoClientConfig | None = None
         self.manager: HonchoSessionManager | None = None
         self.session_key = ""
@@ -129,7 +133,8 @@ class MemoryAdapter:
             context_tokens=config.context_tokens,
         )
         await asyncio.wait_for(
-            asyncio.to_thread(manager.get_or_create, session_key), timeout=self.timeout
+            self.native_calls.run(manager.get_or_create, session_key),
+            timeout=self.timeout,
         )
         self.config = config
         self.manager = manager
@@ -137,7 +142,23 @@ class MemoryAdapter:
 
     async def _run(self, fn, *args, **kwargs):
         return await asyncio.wait_for(
-            asyncio.to_thread(fn, *args, **kwargs), timeout=self.timeout
+            self.native_calls.run(fn, *args, **kwargs), timeout=self.timeout
+        )
+
+    @staticmethod
+    def _unknown_mutation_result() -> types.CallToolResult:
+        return _text_result(
+            {
+                "state": "unknown",
+                "readback_required": True,
+                "message": (
+                    "The memory mutation timed out; its outcome is unknown. "
+                    "Read back the affected conclusion, but absence on an early "
+                    "readback is not proof the original operation has stopped. Do "
+                    "not replay the mutation until the original work has finished "
+                    "and readback establishes whether it was applied."
+                ),
+            }
         )
 
     async def call(self, name: str, args: dict[str, Any]) -> types.CallToolResult:
@@ -211,18 +232,30 @@ class MemoryAdapter:
                 )
                 return _text_result({"conclusions": conclusions})
             if delete_id:
-                deleted = await self._run(
-                    manager.delete_conclusion, self.session_key, delete_id, peer=peer
-                )
+                try:
+                    deleted = await self._run(
+                        manager.delete_conclusion,
+                        self.session_key,
+                        delete_id,
+                        peer=peer,
+                    )
+                except TimeoutError:
+                    return self._unknown_mutation_result()
                 payload = (
                     {"result": f"Conclusion {delete_id} deleted."}
                     if deleted
                     else {"error": "Conclusion deletion failed"}
                 )
                 return _text_result(payload, error=not deleted)
-            saved = await self._run(
-                manager.create_conclusion, self.session_key, conclusion, peer=peer
-            )
+            try:
+                saved = await self._run(
+                    manager.create_conclusion,
+                    self.session_key,
+                    conclusion,
+                    peer=peer,
+                )
+            except TimeoutError:
+                return self._unknown_mutation_result()
             payload = (
                 {"result": f"Conclusion saved for {peer}."}
                 if saved
