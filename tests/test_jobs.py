@@ -1,5 +1,8 @@
 import asyncio
+import hashlib
 import json
+import os
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -34,8 +37,18 @@ class JobTests(unittest.IsolatedAsyncioTestCase):
             return tool_reply(self.poll_outcome)
         raise AssertionError(name)
 
+    async def launch(self, args, *, jobs=None, caller_id="session-a"):
+        adapter = jobs or self.jobs
+        prepared = await adapter.call("job_prepare", args, caller_id=caller_id)
+        if "recovery_token" not in prepared:
+            return prepared
+        started = await adapter.call("job_start", {
+            "job_id": prepared["job_id"], "recovery_token": prepared["recovery_token"],
+        }, caller_id=caller_id)
+        return {**prepared, **started}
+
     async def test_start_returns_recovery_secret_and_runs_existing_background_terminal(self):
-        r = await self.jobs.call("job_start", {"command": "printf okay", "workdir": self.workdir})
+        r = await self.launch({"command": "printf okay", "workdir": self.workdir})
         self.assertEqual(r["state"], "running")
         self.assertTrue(r["job_id"].startswith("job_"))
         self.assertGreaterEqual(len(r["recovery_token"]), 40)
@@ -46,7 +59,7 @@ class JobTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.hermes.call_direct.call_args.kwargs["task_id"], "gateway-job-" + r["job_id"])
 
     async def test_new_session_can_read_and_cancel_with_credential_but_not_without(self):
-        r = await self.jobs.call("job_start", {"command": "printf okay", "workdir": self.workdir})
+        r = await self.launch({"command": "printf okay", "workdir": self.workdir})
         second = ResumableJobs(self.hermes, Path(self.temp.name), allowed_roots=(self.temp.name,))
         with self.assertRaisesRegex(PermissionError, "job credential"):
             await second.call("job_status", {"job_id": r["job_id"], "recovery_token": "x" * 43})
@@ -59,55 +72,73 @@ class JobTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_duplicate_idempotency_does_not_spawn_again(self):
         args = {"command": "printf okay", "workdir": self.workdir, "idempotency_key": "nonce" * 8}
-        r = await self.jobs.call("job_start", args)
-        again = await self.jobs.call("job_start", args)
+        r = await self.launch(args)
+        again = await self.jobs.call("job_prepare", args, caller_id="session-a")
         self.assertEqual(r["job_id"], again["job_id"])
         self.assertNotIn("recovery_token", again)
         self.assertEqual(self.hermes.call_direct.call_count, 1)
         with self.assertRaisesRegex(ValueError, "idempotency"):
-            await self.jobs.call("job_start", {**args, "command": "printf changed"})
+            await self.jobs.call("job_prepare", {**args, "command": "printf changed"}, caller_id="session-a")
 
     async def test_rejects_workdirs_outside_root_and_concurrency_is_bounded(self):
         with self.assertRaisesRegex(ValueError, "workdir"):
-            await self.jobs.call("job_start", {"command": "pwd", "workdir": "/tmp"})
+            await self.launch({"command": "pwd", "workdir": "/tmp"})
         jobs = ResumableJobs(self.hermes, Path(self.temp.name), allowed_roots=(self.temp.name,), max_active=1)
-        await jobs.call("job_start", {"command": "pwd", "workdir": self.workdir})
+        await self.launch({"command": "pwd", "workdir": self.workdir}, jobs=jobs)
         with self.assertRaisesRegex(RuntimeError, "capacity"):
-            await jobs.call("job_start", {"command": "pwd", "workdir": self.workdir})
+            await self.launch({"command": "pwd", "workdir": self.workdir}, jobs=jobs)
 
     async def test_unknown_on_lost_process_never_replays_command(self):
-        r = await self.jobs.call("job_start", {"command": "printf okay", "workdir": self.workdir})
+        r = await self.launch({"command": "printf okay", "workdir": self.workdir})
         self.poll_outcome = {"error": "process not found"}
         result = await self.jobs.call("job_status", {"job_id": r["job_id"], "recovery_token": r["recovery_token"]})
         self.assertEqual(result["state"], "unknown")
         self.assertEqual(self.hermes.call_direct.call_count, 2)
 
     async def test_cancellation_targets_only_job_owner(self):
-        r = await self.jobs.call("job_start", {"command": "printf okay", "workdir": self.workdir})
-        self.poll_outcome = {"status": "killed", "termination_source": "process.kill"}
+        r = await self.launch({"command": "printf okay", "workdir": self.workdir})
+        self.poll_outcome = {
+            "status": "exited", "exit_code": -15,
+            "completion_reason": "killed", "termination_source": "process.kill",
+        }
         cancelled = await self.jobs.call("job_cancel", {"job_id": r["job_id"], "recovery_token": r["recovery_token"]})
         self.assertEqual(cancelled["state"], "cancelled")
-        _, args = self.hermes.call_direct.call_args.args
-        self.assertEqual(args["action"], "kill")
-        self.assertEqual(args["session_id"], "proc_1234")
-        self.assertEqual(self.hermes.call_direct.call_args.kwargs["task_id"], "gateway-job-" + r["job_id"])
+        native_calls = [call.args[1] for call in self.hermes.call_direct.call_args_list]
+        kill_call = next(args for args in native_calls if args.get("action") == "kill")
+        self.assertEqual(kill_call["session_id"], "proc_1234")
+        self.assertEqual(native_calls[-1]["action"], "poll")
+        self.assertEqual(native_calls[-1]["session_id"], "proc_1234")
+        self.assertEqual(self.hermes.call_direct.call_args_list[-1].kwargs["task_id"],
+                         "gateway-job-" + r["job_id"])
 
     async def test_expired_job_is_killed_by_reaper(self):
-        r = await self.jobs.call("job_start", {"command": "printf okay", "workdir": self.workdir, "max_runtime": 1})
+        r = await self.launch({"command": "printf okay", "workdir": self.workdir, "max_runtime": 1})
         self.jobs._set_deadline_for_test(r["job_id"], 0)
         async def running_then_kill(name, args, *, task_id):
             if args.get("action") == "poll":
+                if any(call.args[1].get("action") == "kill"
+                       for call in self.hermes.call_direct.call_args_list):
+                    return tool_reply({
+                        "status": "exited", "exit_code": -15,
+                        "completion_reason": "killed", "termination_source": "process.kill",
+                    })
                 return tool_reply({"status": "running"})
             if args.get("action") == "kill":
-                return tool_reply({"status": "killed"})
+                return tool_reply({
+                    "status": "killed", "completion_reason": "killed",
+                    "termination_source": "process.kill",
+                })
             raise AssertionError(name)
         self.hermes.call_direct.side_effect = running_then_kill
         await self.jobs.maintain()
         status = await self.jobs.call("job_status", {"job_id": r["job_id"], "recovery_token": r["recovery_token"]})
         self.assertEqual(status["state"], "timed_out")
+        actions = [call.args[1].get("action") for call in self.hermes.call_direct.call_args_list
+                   if call.args[1].get("action")]
+        self.assertEqual(actions, ["poll", "kill", "poll"])
 
     async def test_result_and_output_are_retained_after_reconnect(self):
-        r = await self.jobs.call("job_start", {"command": "printf okay", "workdir": self.workdir})
+        r = await self.launch({"command": "printf okay", "workdir": self.workdir})
         first = await self.jobs.call("job_status", {"job_id": r["job_id"], "recovery_token": r["recovery_token"]})
         self.assertEqual(first["output"], "all green")
         second = ResumableJobs(self.hermes, Path(self.temp.name), allowed_roots=(self.temp.name,))
@@ -118,7 +149,7 @@ class JobTests(unittest.IsolatedAsyncioTestCase):
         self.hermes.call_direct.assert_not_called()
 
     async def test_nonzero_exit_is_a_failure(self):
-        r = await self.jobs.call("job_start", {"command": "false", "workdir": self.workdir})
+        r = await self.launch({"command": "false", "workdir": self.workdir})
         self.poll_outcome = {"status": "exited", "exit_code": 23, "output": "failed"}
         receipt = await self.jobs.call("job_status", {"job_id": r["job_id"], "recovery_token": r["recovery_token"]})
         self.assertEqual(receipt["state"], "failed")
@@ -134,13 +165,13 @@ class JobTests(unittest.IsolatedAsyncioTestCase):
     async def test_maintenance_reconciles_completed_jobs_to_free_capacity(self):
         only_one = ResumableJobs(self.hermes, Path(self.temp.name),
                                  allowed_roots=(self.temp.name,), max_active=1)
-        await only_one.call("job_start", {"command": "printf first", "workdir": self.workdir})
+        await self.launch({"command": "printf first", "workdir": self.workdir}, jobs=only_one)
         await only_one.maintain()
-        fresh = await only_one.call("job_start", {"command": "printf second", "workdir": self.workdir})
+        fresh = await self.launch({"command": "printf second", "workdir": self.workdir}, jobs=only_one)
         self.assertEqual(fresh["state"], "running")
 
     async def test_maintenance_preserves_success_after_deadline_instead_of_killing(self):
-        r = await self.jobs.call("job_start", {"command": "printf done", "workdir": self.workdir})
+        r = await self.launch({"command": "printf done", "workdir": self.workdir})
         self.jobs._set_deadline_for_test(r["job_id"], 0)
         await self.jobs.maintain()
         receipt = await self.jobs.call("job_status", {"job_id": r["job_id"], "recovery_token": r["recovery_token"]})
@@ -150,16 +181,17 @@ class JobTests(unittest.IsolatedAsyncioTestCase):
     async def test_ambiguous_start_never_retries_mutating_command(self):
         self.hermes.call_direct.side_effect = RuntimeError("connection dropped")
         args = {"command": "git status", "workdir": self.workdir, "idempotency_key": "recovery-nonce-" + "x" * 18}
-        first = await self.jobs.call("job_start", args)
+        prepared = await self.jobs.call("job_prepare", args, caller_id="verified-agent")
+        first = await self.start_prepared(prepared, caller_id="verified-agent")
         self.assertEqual(first["state"], "unknown")
-        retry = await self.jobs.call("job_start", args)
+        retry = await self.start_prepared(prepared, caller_id="verified-agent")
         self.assertEqual(retry["job_id"], first["job_id"])
         self.assertNotIn("recovery_token", retry)
         self.assertEqual(self.hermes.call_direct.call_count, 1)
 
     async def test_orphan_can_be_adopted_via_scoped_native_list(self):
         self.hermes.call_direct.side_effect = RuntimeError("connection dropped")
-        r = await self.jobs.call("job_start", {"command": "printf ok", "workdir": self.workdir})
+        r = await self.launch({"command": "printf ok", "workdir": self.workdir})
         self.assertEqual(r["state"], "unknown")
         async def retry_native(name, args, *, task_id):
             if args.get("action") == "list":
@@ -176,15 +208,16 @@ class JobTests(unittest.IsolatedAsyncioTestCase):
         from hermes_mcp_gateway.server import Gateway, build_catalog
         gateway = Gateway()
         gateway.jobs = AsyncMock()
-        gateway.jobs.call.return_value = {"job_id": "job_demo", "state": "running", "recovery_token": "a" * 43}
+        gateway.jobs.call.return_value = {"job_id": "job_demo", "state": "running", "replayed": False}
         gateway.catalog = build_catalog([], [], job_tool_schemas())
-        denied = await gateway.call("job_start", {"command": "printf ok", "workdir": self.workdir})
+        credentials = {"job_id": "job_demo", "recovery_token": "a" * 43}
+        denied = await gateway.call("job_start", credentials)
         self.assertTrue(denied.is_error)
-        accepted = await gateway.call("job_start", {"command": "printf ok", "workdir": self.workdir},
+        accepted = await gateway.call("job_start", credentials,
                                       task_id="gateway-session-test")
         self.assertFalse(accepted.is_error)
         self.assertIsInstance(accepted.content[0], types.TextContent)
-        self.assertIn("recovery_token", accepted.content[0].text)
+        self.assertNotIn("recovery_token", accepted.content[0].text)
         recovered = await gateway.call("job_status", {"job_id": "job_demo", "recovery_token": "a" * 43})
         self.assertFalse(recovered.is_error)
         await gateway.execution.close()
@@ -194,28 +227,25 @@ class JobTests(unittest.IsolatedAsyncioTestCase):
         for n in range(2):
             directory = Path(self.workdir) / ("agent-a-" + str(n))
             directory.mkdir()
-            await self.jobs.call("job_start", {"command": "sleep 1", "workdir": str(directory)},
-                                 caller_id="verified-agent-a")
+            await self.launch({"command": "sleep 1", "workdir": str(directory)},
+                              caller_id="verified-agent-a")
         other = Path(self.workdir) / "agent-a-2"
         other.mkdir()
         with self.assertRaisesRegex(RuntimeError, "session capacity"):
-            await self.jobs.call("job_start", {"command": "sleep 1", "workdir": str(other)},
-                                 caller_id="verified-agent-a")
-        accepted = await self.jobs.call("job_start", {"command": "sleep 1", "workdir": str(other)},
-                                        caller_id="verified-agent-b")
+            await self.launch({"command": "sleep 1", "workdir": str(other)},
+                              caller_id="verified-agent-a")
+        accepted = await self.launch({"command": "sleep 1", "workdir": str(other)},
+                                     caller_id="verified-agent-b")
         self.assertEqual(accepted["state"], "running")
 
     async def test_workspace_exclusion_rejects_same_or_overlapping_active_directory(self):
-        await self.jobs.call("job_start", {"command": "sleep 1", "workdir": self.workdir},
-                             caller_id="agent-a")
+        await self.launch({"command": "sleep 1", "workdir": self.workdir}, caller_id="agent-a")
         nested = Path(self.workdir) / "nested"
         nested.mkdir()
         with self.assertRaisesRegex(RuntimeError, "workspace busy"):
-            await self.jobs.call("job_start", {"command": "sleep 1", "workdir": str(nested)},
-                                 caller_id="agent-b")
+            await self.launch({"command": "sleep 1", "workdir": str(nested)}, caller_id="agent-b")
         with self.assertRaisesRegex(RuntimeError, "workspace busy"):
-            await self.jobs.call("job_start", {"command": "sleep 1", "workdir": self.workdir},
-                                 caller_id="agent-c")
+            await self.launch({"command": "sleep 1", "workdir": self.workdir}, caller_id="agent-c")
 
     async def test_two_adapters_enforce_atomic_global_admission(self):
         second = ResumableJobs(self.hermes, Path(self.temp.name), allowed_roots=(self.temp.name,), max_active=1)
@@ -224,8 +254,10 @@ class JobTests(unittest.IsolatedAsyncioTestCase):
         a.mkdir()
         b.mkdir()
         results = await asyncio.gather(
-            self.jobs_with_single_slot().call("job_start", {"command": "sleep 1", "workdir": str(a)}, caller_id="first"),
-            second.call("job_start", {"command": "sleep 1", "workdir": str(b)}, caller_id="second"),
+            self.launch({"command": "sleep 1", "workdir": str(a)},
+                        jobs=self.jobs_with_single_slot(), caller_id="first"),
+            self.launch({"command": "sleep 1", "workdir": str(b)},
+                        jobs=second, caller_id="second"),
             return_exceptions=True,
         )
         self.assertEqual(sum(isinstance(v, dict) for v in results), 1)
@@ -240,8 +272,8 @@ class JobTests(unittest.IsolatedAsyncioTestCase):
         two_dir = Path(self.workdir) / "two"
         one_dir.mkdir()
         two_dir.mkdir()
-        first = await self.jobs.call("job_start", {"command": "sleep 1", "workdir": str(one_dir)})
-        second = await self.jobs.call("job_start", {"command": "sleep 1", "workdir": str(two_dir)})
+        first = await self.launch({"command": "sleep 1", "workdir": str(one_dir)})
+        second = await self.launch({"command": "sleep 1", "workdir": str(two_dir)})
         slow_started = asyncio.Event()
         release = asyncio.Event()
 
@@ -269,8 +301,9 @@ class JobTests(unittest.IsolatedAsyncioTestCase):
         directory = Path(self.workdir) / "job-one"
         directory.mkdir()
         args = {"command": "printf ok", "workdir": str(directory), "idempotency_key": "shared" * 5}
-        first = await self.jobs.call("job_start", args, caller_id="agent-a")
-        again = await self.jobs.call("job_start", args, caller_id="agent-b")
+        prepared = await self.jobs.call("job_prepare", args, caller_id="agent-a")
+        first = await self.start_prepared(prepared, caller_id="agent-a")
+        again = await self.jobs.call("job_prepare", args, caller_id="agent-b")
         self.assertEqual(first["job_id"], again["job_id"])
         self.assertNotIn("recovery_token", again)
         self.assertEqual(self.hermes.call_direct.call_count, 1)
@@ -280,14 +313,14 @@ class JobTests(unittest.IsolatedAsyncioTestCase):
         for path in paths:
             path.mkdir()
         receipts = await asyncio.gather(*(
-            self.jobs.call("job_start", {"command": "printf ok", "workdir": str(paths[n])},
-                           caller_id="session-" + str(n))
+            self.launch({"command": "printf ok", "workdir": str(paths[n])},
+                        caller_id="session-" + str(n))
             for n in range(4)
         ))
         self.assertEqual(len({r["job_id"] for r in receipts}), 4)
         with self.assertRaisesRegex(RuntimeError, "capacity"):
-            await self.jobs.call("job_start", {"command": "printf ok", "workdir": str(paths[4])},
-                                 caller_id="session-4")
+            await self.launch({"command": "printf ok", "workdir": str(paths[4])},
+                              caller_id="session-4")
         completed = await asyncio.gather(*(
             self.jobs.call("job_status", {
                 "job_id": receipt["job_id"], "recovery_token": receipt["recovery_token"],
@@ -312,5 +345,314 @@ class JobTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("owner_hash", columns)
         self.assertIn("workdir", columns)
 
+    async def prepare(self, command="printf okay", workdir=None, *, caller_id="session-a", **extra):
+        return await self.jobs.call("job_prepare", {
+            "command": command, "workdir": workdir or self.workdir, **extra,
+        }, caller_id=caller_id)
+
+    async def start_prepared(self, prepared, *, caller_id="session-a", jobs=None):
+        return await (jobs or self.jobs).call("job_start", {
+            "job_id": prepared["job_id"], "recovery_token": prepared["recovery_token"],
+        }, caller_id=caller_id)
+
+    async def test_prepare_persists_credential_before_native_work(self):
+        prepared = await self.prepare(command="printf SECRET_COMMAND")
+        self.assertEqual(prepared["state"], "prepared")
+        self.assertEqual(len(prepared["recovery_token"]), 43)
+        self.hermes.call_direct.assert_not_called()
+        with sqlite3.connect(self.jobs.path) as db:
+            row = db.execute(
+                "SELECT credential_hash, prepared_command FROM jobs WHERE job_id=?",
+                (prepared["job_id"],),
+            ).fetchone()
+        self.assertNotEqual(row[0], prepared["recovery_token"])
+        self.assertEqual(row[1], "printf SECRET_COMMAND")
+        status = await self.jobs.call("job_status", {
+            "job_id": prepared["job_id"], "recovery_token": prepared["recovery_token"],
+        })
+        self.assertEqual(status["state"], "prepared")
+        self.hermes.call_direct.assert_not_called()
+
+    async def test_start_requires_prepared_credential_and_launches_once_across_sessions(self):
+        prepared = await self.prepare()
+        wrong = {"job_id": prepared["job_id"], "recovery_token": "x" * 43}
+        with self.assertRaisesRegex(PermissionError, "credential"):
+            await self.jobs.call("job_start", wrong, caller_id="verified-session")
+        with self.assertRaisesRegex(ValueError, "job_start"):
+            await self.jobs.call("job_start", {
+                "job_id": prepared["job_id"], "recovery_token": prepared["recovery_token"],
+                "command": "printf changed",
+            }, caller_id="verified-session")
+        first = await self.start_prepared(prepared)
+        second = await self.start_prepared(prepared, caller_id="different-verified-session")
+        self.assertEqual(first["job_id"], second["job_id"])
+        self.assertEqual(first["state"], second["state"])
+        self.assertEqual(self.hermes.call_direct.call_count, 1)
+        self.assertNotIn("recovery_token", first)
+
+    async def test_prepare_requires_verified_caller_and_changed_idempotent_payload_is_denied(self):
+        with self.assertRaisesRegex(PermissionError, "caller"):
+            await self.jobs.call("job_prepare", {"command": "pwd", "workdir": self.workdir})
+        prepared = await self.prepare(idempotency_key="prepare-key-0123456789")
+        again = await self.jobs.call("job_prepare", {
+            "command": "printf okay", "workdir": self.workdir,
+            "idempotency_key": "prepare-key-0123456789",
+        }, caller_id="session-b")
+        self.assertEqual(prepared["job_id"], again["job_id"])
+        self.assertNotIn("recovery_token", again)
+        with self.assertRaisesRegex(ValueError, "idempotency"):
+            await self.jobs.call("job_prepare", {
+                "command": "printf changed", "workdir": self.workdir,
+                "idempotency_key": "prepare-key-0123456789",
+            }, caller_id="session-a")
+        with self.assertRaisesRegex(PermissionError, "caller"):
+            await self.start_prepared(prepared, caller_id=None)
+
+    async def test_prepare_preserves_legacy_idempotency_fingerprint(self):
+        command = "printf legacy"
+        idempotency_key = "legacy-key-0123456789"
+        path = str(Path(self.workdir).resolve())
+        request_hash = hashlib.sha256(json.dumps([command, path, 1800]).encode()).hexdigest()
+        idempotency_hash = hashlib.sha256(idempotency_key.encode()).hexdigest()
+        legacy_id = "job_" + "a" * 32
+        with sqlite3.connect(self.jobs.path) as db:
+            db.execute(
+                "INSERT INTO jobs (job_id,credential_hash,request_hash,idempotency_hash,native_id,"
+                "state,created,deadline,updated,exit_code,output) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (legacy_id, "0" * 64, request_hash, idempotency_hash, "proc_legacy",
+                 "succeeded", 1, 1801, 2, 0, "legacy result"),
+            )
+        replay = await self.jobs.call("job_prepare", {
+            "command": command, "workdir": self.workdir, "idempotency_key": idempotency_key,
+        }, caller_id="new-session")
+        self.assertEqual(replay["job_id"], legacy_id)
+        self.assertTrue(replay["replayed"])
+        self.assertNotIn("recovery_token", replay)
+
+    async def test_prepared_admission_is_bounded_per_owner_and_global(self):
+        bounded = ResumableJobs(
+            self.hermes, Path(self.temp.name), allowed_roots=(self.workdir,),
+            max_prepared=3, max_prepared_per_owner=2,
+        )
+        first = await bounded.call("job_prepare", {
+            "command": "sleep 1", "workdir": self.workdir,
+        }, caller_id="owner-a")
+        second = await bounded.call("job_prepare", {
+            "command": "sleep 2", "workdir": self.workdir,
+        }, caller_id="owner-a")
+        with self.assertRaisesRegex(RuntimeError, "prepared session capacity"):
+            await bounded.call("job_prepare", {
+                "command": "sleep 3", "workdir": self.workdir,
+            }, caller_id="owner-a")
+        third = await bounded.call("job_prepare", {
+            "command": "sleep 4", "workdir": self.workdir,
+        }, caller_id="owner-b")
+        with sqlite3.connect(bounded.path) as db:
+            owners = dict(db.execute(
+                "SELECT job_id,owner_hash FROM jobs WHERE state='prepared'"
+            ))
+        self.assertEqual(owners[first["job_id"]], bounded._caller_hash("owner-a"))
+        self.assertEqual(owners[second["job_id"]], bounded._caller_hash("owner-a"))
+        self.assertEqual(owners[third["job_id"]], bounded._caller_hash("owner-b"))
+        with self.assertRaisesRegex(RuntimeError, "prepared capacity"):
+            await bounded.call("job_prepare", {
+                "command": "sleep 5", "workdir": self.workdir,
+            }, caller_id="owner-c")
+        # The preparing owner is not the active-quota owner; recovery may start
+        # the frozen request from another verified session.
+        started = await bounded.call("job_start", {
+            "job_id": first["job_id"], "recovery_token": first["recovery_token"],
+        }, caller_id="recovery-session")
+        self.assertEqual(started["state"], "running")
+        with sqlite3.connect(bounded.path) as db:
+            active_owner = db.execute(
+                "SELECT owner_hash FROM jobs WHERE job_id=?", (first["job_id"],),
+            ).fetchone()[0]
+        self.assertEqual(active_owner, bounded._caller_hash("recovery-session"))
+
+    async def test_start_rejects_missing_or_replaced_workdir_and_rechecks_before_dispatch(self):
+        root = Path(self.workdir)
+        original = root / "frozen-original"
+        replacement = root / "frozen-replacement"
+        original.mkdir()
+        replacement.mkdir()
+        prepared = await self.prepare(workdir=str(original))
+        moved = root / "frozen-original-moved"
+        original.rename(moved)
+        os.symlink(replacement, original)
+        with self.assertRaisesRegex(ValueError, "prepared workdir"):
+            await self.start_prepared(prepared)
+        self.assertEqual(self.jobs._get(prepared["job_id"])[5], "prepared")
+        self.hermes.call_direct.assert_not_called()
+        original.unlink()
+        moved.rename(original)
+
+        missing = root / "frozen-missing"
+        missing.mkdir()
+        missing_job = await self.prepare(workdir=str(missing))
+        missing.rmdir()
+        with self.assertRaisesRegex(ValueError, "prepared workdir"):
+            await self.start_prepared(missing_job)
+        self.hermes.call_direct.assert_not_called()
+
+        racing = root / "frozen-racing"
+        racing.mkdir()
+        race_job = await self.prepare(workdir=str(racing))
+        real_revalidate = self.jobs._revalidate_workdir
+        validation_count = 0
+
+        def replace_after_admission(frozen_path):
+            nonlocal validation_count
+            validation_count += 1
+            if validation_count == 2:
+                moved_racing = root / "frozen-racing-moved"
+                racing.rename(moved_racing)
+                os.symlink(replacement, racing)
+            return real_revalidate(frozen_path)
+
+        self.jobs._revalidate_workdir = replace_after_admission
+        with self.assertRaisesRegex(ValueError, "prepared workdir"):
+            await self.start_prepared(race_job)
+        self.jobs._revalidate_workdir = real_revalidate
+        self.assertEqual(validation_count, 2)
+        self.assertEqual(self.jobs._get(race_job["job_id"])[5], "failed")
+        self.hermes.call_direct.assert_not_called()
+
+    def test_database_file_is_private_without_chmodding_existing_home(self):
+        directory = Path(self.temp.name) / "operator-home"
+        directory.mkdir(mode=0o755)
+        os.chmod(directory, 0o755)
+        database = ResumableJobs(self.hermes, directory, allowed_roots=(self.temp.name,))
+        self.assertEqual(os.stat(directory).st_mode & 0o777, 0o755)
+        self.assertEqual(os.stat(database.path).st_mode & 0o777, 0o600)
+
+        other = Path(self.temp.name) / "operator-home-link"
+        other.mkdir()
+        victim = other / "outside.sqlite3"
+        victim.write_text("leave untouched")
+        link = other / "gateway-jobs.sqlite3"
+        link.symlink_to(victim)
+        with self.assertRaisesRegex(ValueError, "symlink"):
+            ResumableJobs(self.hermes, other, allowed_roots=(self.temp.name,))
+        self.assertEqual(victim.read_text(), "leave untouched")
+
+    async def test_concurrent_starts_launch_native_exactly_once(self):
+        prepared = await self.prepare()
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        async def delayed(name, args, *, task_id):
+            entered.set()
+            await release.wait()
+            return tool_reply(self.outcome)
+
+        self.hermes.call_direct.side_effect = delayed
+        first = asyncio.create_task(self.start_prepared(prepared))
+        await asyncio.wait_for(entered.wait(), timeout=1)
+        second = await self.start_prepared(prepared, caller_id="other-verified-session")
+        self.assertEqual(second["state"], "starting")
+        release.set()
+        completed = await first
+        self.assertEqual(completed["state"], "running")
+        self.assertEqual(self.hermes.call_direct.call_count, 1)
+
+    async def test_start_ack_loss_is_recovered_without_relaunch(self):
+        prepared = await self.prepare()
+        self.hermes.call_direct.side_effect = RuntimeError("ack lost after dispatch")
+        lost = await self.start_prepared(prepared)
+        self.assertEqual(lost["state"], "unknown")
+        self.hermes.call_direct.side_effect = None
+        recovered = await self.start_prepared(prepared, caller_id="other-verified-session")
+        self.assertEqual(recovered["state"], "unknown")
+        self.assertEqual(self.hermes.call_direct.call_count, 1)
+
+    async def test_prepared_limit_ttl_and_not_an_admission_reservation(self):
+        bounded = ResumableJobs(self.hermes, Path(self.temp.name),
+                                allowed_roots=(self.workdir,), max_active=1,
+                                max_prepared=1, prepared_ttl=3600)
+        first = await bounded.call("job_prepare", {
+            "command": "sleep 1", "workdir": self.workdir,
+        }, caller_id="one")
+        with self.assertRaisesRegex(RuntimeError, "prepared capacity"):
+            await bounded.call("job_prepare", {
+                "command": "sleep 2", "workdir": self.workdir,
+            }, caller_id="two")
+        # Expiry prunes the abandoned row. Preparing itself does not reserve
+        # admission capacity or workspace; the start transaction does.
+        with sqlite3.connect(bounded.path) as db:
+            db.execute("UPDATE jobs SET prepared_expires=0 WHERE job_id=?", (first["job_id"],))
+        fresh_dir = Path(self.workdir) / "fresh"
+        fresh_dir.mkdir()
+        second = await bounded.call("job_prepare", {
+            "command": "sleep 2", "workdir": str(fresh_dir),
+        }, caller_id="two")
+        with sqlite3.connect(bounded.path) as db:
+            self.assertIsNone(db.execute("SELECT 1 FROM jobs WHERE job_id=?", (first["job_id"],)).fetchone())
+        await bounded.call("job_start", {
+            "job_id": second["job_id"], "recovery_token": second["recovery_token"],
+        }, caller_id="two")
+        third_dir = Path(self.workdir) / "third"
+        third_dir.mkdir()
+        third = await bounded.call("job_prepare", {
+            "command": "sleep 3", "workdir": str(third_dir),
+        }, caller_id="three")
+        with self.assertRaisesRegex(RuntimeError, "capacity"):
+            await bounded.call("job_start", {
+                "job_id": third["job_id"], "recovery_token": third["recovery_token"],
+            }, caller_id="three")
+
+    async def test_drain_blocks_fresh_launch_but_not_duplicate_start_status_or_cancel(self):
+        active = await self.prepare()
+        await self.start_prepared(active)
+        later_dir = Path(self.workdir) / "later"
+        later_dir.mkdir()
+        prepared = await self.prepare(command="printf later", workdir=str(later_dir))
+        with sqlite3.connect(self.jobs.path) as db:
+            db.execute("INSERT OR REPLACE INTO gateway_settings(key,value) VALUES ('draining','1')")
+        self.assertTrue(self.jobs.is_draining())
+        self.assertTrue(self.jobs._draining_value("2"))
+        self.assertTrue(self.jobs._draining_value("corrupt"))
+        self.assertFalse(self.jobs._draining_value("0"))
+        duplicate = await self.start_prepared(active, caller_id="other-verified-session")
+        self.assertEqual(duplicate["state"], "running")
+        with self.assertRaisesRegex(RuntimeError, "draining"):
+            await self.start_prepared(prepared)
+        status = await self.jobs.call("job_status", {
+            "job_id": active["job_id"], "recovery_token": active["recovery_token"],
+        })
+        self.assertEqual(status["state"], "succeeded")
+        cancelled = await self.jobs.call("job_cancel", {
+            "job_id": prepared["job_id"], "recovery_token": prepared["recovery_token"],
+        })
+        self.assertEqual(cancelled["state"], "cancelled")
+
+    async def test_unknown_after_deadline_keeps_capacity_and_workspace_quarantined(self):
+        one_dir = Path(self.workdir) / "unknown-workspace"
+        one_dir.mkdir()
+        prepared = await self.prepare(command="mutate", workdir=str(one_dir))
+        self.hermes.call_direct.side_effect = RuntimeError("lost start acknowledgement")
+        started = await self.start_prepared(prepared)
+        self.assertEqual(started["state"], "unknown")
+        self.jobs._set_deadline_for_test(started["job_id"], 0)
+        # Scoped process listing cannot prove the process is gone.
+        self.hermes.call_direct.side_effect = lambda *args, **kwargs: tool_reply({"processes": []})
+        await self.jobs.maintain()
+        two_dir = one_dir / "nested"
+        two_dir.mkdir()
+        other = await self.prepare(command="fresh", workdir=str(two_dir), caller_id="other")
+        with self.assertRaisesRegex(RuntimeError, "workspace busy"):
+            await self.start_prepared(other, caller_id="other")
+        self.assertEqual(self.hermes.call_direct.call_count, 2)
+
+    def test_gateway_settings_contract_and_legacy_migration(self):
+        with sqlite3.connect(self.jobs.path) as db:
+            settings = db.execute(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='gateway_settings'"
+            ).fetchone()[0]
+            columns = {row[1] for row in db.execute("PRAGMA table_info(jobs)")}
+        self.assertIn("key TEXT PRIMARY KEY", settings)
+        self.assertIn("value TEXT NOT NULL", settings)
+        self.assertTrue({"prepared_command", "prepared_max_runtime", "prepared_expires"} <= columns)
+
     def test_catalog_contains_job_tools(self):
-        self.assertEqual({t.name for t in job_tool_schemas()}, {"job_start", "job_status", "job_cancel"})
+        self.assertEqual({t.name for t in job_tool_schemas()}, {"job_prepare", "job_start", "job_status", "job_cancel"})
