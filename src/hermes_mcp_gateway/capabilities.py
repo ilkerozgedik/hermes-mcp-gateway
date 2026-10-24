@@ -2,12 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 from typing import Any
 
 from mcp import types
 from tools.cronjob_tools import cronjob
-from tools.delegate_tool import delegate_task
 from tools.session_search_tool import session_search
 
 _SESSION_ALLOWED = frozenset(
@@ -41,7 +39,6 @@ _CRON_ALLOWED = frozenset(
     }
 )
 _DELEGATE_ALLOWED = frozenset({"goal", "context", "tasks"})
-_SAFE_DELEGATION_TOOLSETS = ["web", "vision", "skills", "file", "terminal", "code_execution"]
 
 
 def _text_result(value: str, *, is_error: bool = False) -> types.CallToolResult:
@@ -101,10 +98,10 @@ def capability_tool_schemas() -> list[types.Tool]:
         types.Tool(
             name="delegate_task",
             description=(
-                "Run one or two Hermes leaf subagents synchronously in isolated contexts. "
-                "Spawning costs model inference. Children may use "
-                "web, vision, skills, and native file/terminal/code tools; "
-                "recursive delegation is not exposed."
+                "Synchronous child inference is currently disabled through this Gateway "
+                "because the native delegation path has no enforceable request deadline. "
+                "Use native Hermes delegate_task for synchronous delegation; use job_prepare "
+                "and job_start for long-running terminal commands."
             ),
             input_schema={
                 "type": "object",
@@ -171,56 +168,7 @@ def capability_tool_schemas() -> list[types.Tool]:
 CAPABILITY_TOOLS = frozenset(tool.name for tool in capability_tool_schemas())
 
 
-def _build_delegation_parent():
-    from hermes_cli.config import load_config, split_model_config_default
-    from hermes_cli.fallback_config import get_fallback_chain
-    from hermes_cli.runtime_provider import resolve_runtime_provider
-    from run_agent import AIAgent
-    from tools.mcp_tool_discovery import discover_mcp_tools
-
-    cfg = load_config()
-    model_cfg = cfg.get("model") or {}
-    if isinstance(model_cfg, str):
-        cfg_model = model_cfg
-    else:
-        raw_default = model_cfg.get("default") or model_cfg.get("model") or ""
-        if isinstance(raw_default, dict):
-            cfg_model, _ = split_model_config_default(raw_default)
-        else:
-            cfg_model = str(raw_default or "")
-    effective_model = os.getenv("HERMES_INFERENCE_MODEL", "").strip() or cfg_model
-
-    runtime = resolve_runtime_provider(
-        requested=None,
-        target_model=effective_model or None,
-        explicit_base_url=None,
-    )
-    discover_mcp_tools()
-
-    parent = AIAgent(
-        api_key=runtime.get("api_key"),
-        base_url=runtime.get("base_url"),
-        provider=runtime.get("provider"),
-        requested_provider=runtime.get("requested_provider"),
-        api_mode=runtime.get("api_mode"),
-        model=effective_model,
-        credential_pool=runtime.get("credential_pool"),
-        fallback_model=get_fallback_chain(cfg) or None,
-        enabled_toolsets=list(_SAFE_DELEGATION_TOOLSETS),
-        quiet_mode=True,
-        skip_context_files=True,
-        skip_memory=True,
-        skip_background_review=True,
-        load_soul_identity=False,
-    )
-    parent._get_session_db_for_recall()
-    return parent
-
-
 class HermesCapabilities:
-    def __init__(self, *, max_concurrent_delegations: int = 2):
-        self._delegation_semaphore = asyncio.Semaphore(max_concurrent_delegations)
-
     def check(self) -> bool:
         try:
             from cron.scheduler import create_job_with_scheduler_registration
@@ -281,21 +229,15 @@ class HermesCapabilities:
                 if not str(task.get("goal") or "").strip():
                     return _error(f"delegate_task task {index} requires goal")
 
-        async with self._delegation_semaphore:
-            parent = await asyncio.to_thread(_build_delegation_parent)
-            try:
-                payload = await asyncio.to_thread(
-                    delegate_task,
-                    goal=goal,
-                    context=arguments.get("context"),
-                    tasks=tasks,
-                    role="leaf",
-                    background=False,
-                    parent_agent=parent,
-                )
-            finally:
-                await asyncio.to_thread(parent.close)
-        return _hermes_result(payload)
+        # delegate_task blocks on child model inference in worker threads. An
+        # asyncio timeout would abandon, not stop, that work; fail closed before
+        # creating an agent, issuing model calls, or leaving a runaway thread.
+        return _error(
+            "Synchronous delegate_task is disabled through this Gateway because "
+            "child model inference has no enforceable deadline. Use native Hermes "
+            "delegate_task for synchronous delegation; use job_prepare/job_start "
+            "for long-running terminal commands."
+        )
 
     async def _cronjob(self, arguments: dict[str, Any]) -> types.CallToolResult:
         if rejected := _reject_unknown(arguments, _CRON_ALLOWED):

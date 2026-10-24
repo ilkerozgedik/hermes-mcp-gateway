@@ -4,6 +4,7 @@ import asyncio
 from copy import deepcopy
 import json
 import logging
+import re
 import secrets
 import time
 from contextlib import asynccontextmanager
@@ -53,6 +54,19 @@ from .upstreams import (
 )
 
 logger = logging.getLogger("hermes_mcp_gateway")
+if logger.level == logging.NOTSET:
+    # Uvicorn's application log level is INFO; set this explicitly too so request
+    # telemetry remains enabled when the Gateway is embedded by another runner.
+    logger.setLevel(logging.INFO)
+if not logger.handlers and not logging.getLogger().handlers:
+    # Uvicorn configures its own loggers but leaves the root logger without a
+    # handler. Give gateway request telemetry a real output path in that case.
+    handler = logging.StreamHandler()
+    handler.setFormatter(
+        logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s")
+    )
+    logger.addHandler(handler)
+    logger.propagate = False
 
 
 def browser_task_id(ctx: Any) -> str | None:
@@ -257,11 +271,18 @@ def normalize_result(
     )
 
 
-def error_result(message: str, *, limit: int) -> types.CallToolResult:
+def error_result(
+    message: str, *, limit: int, category: str | None = None
+) -> types.CallToolResult:
     text = redact_sensitive_text(str(message), force=True)
     if len(text) > limit:
         text = text[:limit]
-    return types.CallToolResult(content=[types.TextContent(text=text)], is_error=True)
+    metadata = {"_gateway_error_category": category} if category else None
+    return types.CallToolResult(
+        content=[types.TextContent(text=text)],
+        structured_content=metadata,
+        is_error=True,
+    )
 
 
 class Gateway:
@@ -292,6 +313,12 @@ class Gateway:
         self.jobs: ResumableJobs | None = None
         self._job_reaper_task: asyncio.Task[None] | None = None
         self._session_reaper_task: asyncio.Task[None] | None = None
+        self._inflight_requests = 0
+
+    @property
+    def inflight_requests(self) -> int:
+        """Active MCP tool handlers; health/readiness endpoints are not counted."""
+        return self._inflight_requests
 
     @staticmethod
     def _payload_has_error(value: Any) -> bool:
@@ -548,12 +575,13 @@ class Gateway:
             return error_result(
                 f"Unknown or disallowed tool: {name}", limit=self.config.max_text_chars
             )
-        if (name in STATEFUL_HERMES_TOOLS or name == "job_start") and not task_id:
+        if (name in STATEFUL_HERMES_TOOLS or name in {"job_prepare", "job_start"}) and not task_id:
             return error_result(
-                "MCP session identity is required for stateful browser/process tools. "
-                "On modern sessionless MCP, discover and call session_open, then pass "
-                "its session_token at the top level of each tool_call. Legacy stateful "
-                "clients may use their SDK session; independent commands can use execute_code.",
+                "MCP session identity is required for stateful browser/process tools and "
+                "job preparation/start. On modern sessionless MCP, discover and call "
+                "session_open, then pass its session_token at the top level of each "
+                "tool_call. Legacy stateful clients may use their SDK session; "
+                "independent commands can use execute_code.",
                 limit=self.config.max_text_chars,
             )
         try:
@@ -615,14 +643,20 @@ class Gateway:
                             limit=self.config.max_text_chars,
                         )
                     payload = await asyncio.to_thread(self.startup.read)
-                elif name in {"job_start", "job_status", "job_cancel"}:
+                elif name in {"job_prepare", "job_start", "job_status", "job_cancel"}:
                     if self.jobs is None:
                         return error_result("job service not started", limit=self.config.max_text_chars)
                     payload = await self.jobs.call(
-                        name, arguments, caller_id=task_id if name == "job_start" else None,
+                        name,
+                        arguments,
+                        caller_id=task_id if name in {"job_prepare", "job_start"} else None,
                     )
-                    if name == "job_start":
-                        return types.CallToolResult(content=[types.TextContent(text=json.dumps(payload))])
+                    if name in {"job_prepare", "job_start"}:
+                        # Credential issuance is intentional and must bypass output
+                        # redaction; credentials are never included in logs.
+                        return types.CallToolResult(
+                            content=[types.TextContent(text=json.dumps(payload))]
+                        )
                 elif name == "session_open":
                     if arguments:
                         return error_result(
@@ -678,16 +712,33 @@ class Gateway:
                 limit=self.config.max_text_chars,
                 preserve_images=preserve_images,
             )
+        except asyncio.CancelledError:
+            # Cancellation is a request outcome, not an upstream tool error.
+            raise
+        except TimeoutError:
+            if name in WEB_TOOLS:
+                self.web_tools_ready = False
+                self.missing_final_tools = set(WEB_TOOLS)
+                self._web_probe_at = 0.0
+            logger.warning(
+                "gateway_tool_finished source=%s tool=%s category=timeout",
+                entry.source,
+                name,
+            )
+            return error_result(
+                f"{entry.source} upstream timed out",
+                limit=self.config.max_text_chars,
+                category="timeout",
+            )
         except Exception as exc:  # noqa: BLE001 - upstream boundary must normalize failures
             if name in WEB_TOOLS:
                 self.web_tools_ready = False
                 self.missing_final_tools = set(WEB_TOOLS)
                 self._web_probe_at = 0.0
             logger.warning(
-                "upstream tool call failed: source=%s tool=%s error=%s",
+                "gateway_tool_finished source=%s tool=%s category=tool_error",
                 entry.source,
                 name,
-                redact_sensitive_text(str(exc), force=True),
             )
             return error_result(
                 f"{entry.source} upstream unavailable or failed: {exc}",
@@ -770,52 +821,142 @@ def create_app(config: GatewayConfig | None = None):
         return types.ListToolsResult(tools=public_schemas(gateway.catalog))
 
     async def call_tool(_ctx, params):
-        if params.name not in PUBLIC_NAMES:
-            return error_result(
-                f"Unknown or disallowed tool: {params.name}",
-                limit=gateway.config.max_text_chars,
-            )
-        arguments = params.arguments or {}
-        if params.name != "tool_call":
-            return await gateway.call(params.name, arguments)
-
-        arguments = dict(arguments)
-        token_present = "session_token" in arguments
-        token = arguments.pop("session_token", None)
-        lease = None
-        if token_present:
-            lease = await gateway.acquire_session_token(token)
-            if lease is None:
-                return error_result(
-                    "Invalid or expired session token",
-                    limit=gateway.config.max_text_chars,
-                )
-        task_id = lease.task_id if lease is not None else browser_task_id(_ctx)
-        call_names = arguments.get("calls", [])
-        selected = call_names[0].get("name") if isinstance(call_names, list) and call_names and isinstance(call_names[0], dict) else None
-        trace_name = selected if selected in gateway.catalog else "invalid"
+        gateway._inflight_requests += 1
         request_id = secrets.token_hex(8)
         started = time.monotonic()
+        result_category = "unknown"
+        trace_name = "invalid"
 
-        async def warn_if_slow() -> None:
-            await asyncio.sleep(30)
-            logger.warning("slow_mcp_request id=%s tool=%s elapsed_ms=%d",
-                           request_id, trace_name, int((time.monotonic() - started) * 1000))
-
-        monitor = asyncio.create_task(warn_if_slow())
+        request = getattr(_ctx, "request", None)
+        headers = getattr(request, "headers", None)
         try:
-            return await gateway.call(
-                params.name,
-                arguments,
-                task_id=task_id,
-                session_capability=lease,
+            inbound_id = headers.get("x-request-id") if headers is not None else None
+        except Exception:  # noqa: BLE001 - correlation metadata is untrusted
+            inbound_id = None
+        correlation_id = (
+            inbound_id
+            if isinstance(inbound_id, str)
+            and len(inbound_id) <= 64
+            and re.fullmatch(r"[A-Za-z0-9._:-]{1,64}", inbound_id)
+            else "none"
+        )
+
+        if params.name == "tool_call":
+            initial_arguments = params.arguments or {}
+            calls = initial_arguments.get("calls", []) if isinstance(initial_arguments, dict) else []
+            selected = (
+                calls[0].get("name")
+                if isinstance(calls, list)
+                and len(calls) == 1
+                and isinstance(calls[0], dict)
+                else None
+            )
+            trace_name = selected if selected in gateway.catalog else "invalid"
+        elif params.name in PUBLIC_NAMES:
+            trace_name = params.name
+
+        def categorize(result: types.CallToolResult) -> str:
+            if result.is_error:
+                metadata = result.structured_content
+                category = (
+                    metadata.get("_gateway_error_category")
+                    if isinstance(metadata, dict)
+                    else None
+                )
+                if category in {"timeout", "tool_error"}:
+                    return category
+                return "tool_error"
+            if gateway._tool_result_has_error(result):
+                return "tool_error"
+            values = [result.structured_content]
+            for item in result.content:
+                if isinstance(item, types.TextContent):
+                    try:
+                        values.append(json.loads(item.text))
+                    except (TypeError, json.JSONDecodeError):
+                        continue
+            if any(isinstance(value, dict) and value.get("state") == "unknown" for value in values):
+                return "unknown"
+            return "success"
+
+        async def dispatch():
+            if params.name not in PUBLIC_NAMES:
+                return error_result(
+                    f"Unknown or disallowed tool: {params.name}",
+                    limit=gateway.config.max_text_chars,
+                )
+            arguments = params.arguments or {}
+            if params.name != "tool_call":
+                return await gateway.call(params.name, arguments)
+
+            arguments = dict(arguments)
+            token_present = "session_token" in arguments
+            token = arguments.pop("session_token", None)
+            calls = arguments.get("calls", [])
+            selected_for_auth = (
+                calls[0].get("name")
+                if isinstance(calls, list)
+                and len(calls) == 1
+                and isinstance(calls[0], dict)
+                else None
+            )
+            recovery_call = selected_for_auth in {"job_status", "job_cancel"}
+            lease = None
+            if token_present and not recovery_call:
+                lease = await gateway.acquire_session_token(token)
+                if lease is None:
+                    return error_result(
+                        "Invalid or expired session token",
+                        limit=gateway.config.max_text_chars,
+                    )
+            task_id = (
+                lease.task_id
+                if lease is not None
+                else None
+                if recovery_call
+                else browser_task_id(_ctx)
+            )
+            try:
+                return await gateway.call(
+                    params.name,
+                    arguments,
+                    task_id=task_id,
+                    session_capability=lease,
+                )
+            finally:
+                if lease is not None:
+                    await asyncio.shield(gateway.release_session_token(lease))
+
+        try:
+            result = await dispatch()
+            result_category = categorize(result)
+            return result
+        except asyncio.CancelledError:
+            result_category = "cancelled"
+            raise
+        except TimeoutError:
+            result_category = "timeout"
+            return error_result(
+                "Gateway request timed out",
+                limit=gateway.config.max_text_chars,
+                category="timeout",
+            )
+        except Exception:  # noqa: BLE001 - transport boundary returns a safe failure
+            result_category = "unknown"
+            return error_result(
+                "Gateway request failed",
+                limit=gateway.config.max_text_chars,
             )
         finally:
-            monitor.cancel()
-            logger.info("mcp_request_finished id=%s tool=%s elapsed_ms=%d",
-                        request_id, trace_name, int((time.monotonic() - started) * 1000))
-            if lease is not None:
-                await gateway.release_session_token(lease)
+            gateway._inflight_requests -= 1
+            logger.info(
+                "gateway_request request_id=%s correlation_id=%s tool=%s elapsed_ms=%d result=%s",
+                request_id,
+                correlation_id,
+                trace_name,
+                int((time.monotonic() - started) * 1000),
+                result_category,
+            )
 
     server = Server(
         "hermes-mcp-gateway",
@@ -826,10 +967,17 @@ def create_app(config: GatewayConfig | None = None):
             "Use tool_search, tool_describe, then tool_call for deferred tools. For browser, "
             "terminal and process continuity on modern sessionless MCP, discover and call "
             "session_open once, pass its returned session_token at the top level of every "
-            "related tool_call, and use session_close when finished. "
-            "For builds, test suites, and other long commands prefer job_start over "
-            "foreground terminal; save the one-time recovery_token and query job_status "
-            "from a new session after disconnect. Never blindly retry mutations."
+            "related tool_call, and use session_close when finished. For long commands, "
+            "save its one-time recovery_token, then call job_start with the prepared "
+            "job_id and recovery_token. job_prepare and job_start require a verified "
+            "interactive session; renew an expired session with session_open before "
+            "starting. Use job_status or job_cancel with the recovery credential from "
+            "any session or no session. After disconnect, check job_status before any "
+            "retry. Backend deadlines are not uniform: Hermes MCP reads and LSP RPCs "
+            "default to 30 seconds, Samchon Graph calls may use 120 seconds, and "
+            "native execute_code has a 30-second worker deadline. Thread-backed native "
+            "browser, vision, and direct tool calls are not force-stopped by Gateway "
+            "cancellation. Never blindly replay a mutation."
         ),
         lifespan=lifespan,
         on_list_tools=list_tools,
@@ -838,7 +986,9 @@ def create_app(config: GatewayConfig | None = None):
 
     async def healthz(_request: Request):
         # Liveness must not run upstream discovery, LSP, or paid web probes.
-        return JSONResponse({"status": "ok"})
+        return JSONResponse(
+            {"status": "ok", "inflight_requests": gateway.inflight_requests}
+        )
 
     async def readyz(_request: Request):
         payload = await gateway.health()

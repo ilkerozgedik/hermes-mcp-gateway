@@ -1,6 +1,6 @@
 import json
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 from hermes_mcp_gateway.capabilities import HermesCapabilities, capability_tool_schemas
 
@@ -152,47 +152,46 @@ class DelegationCapabilityTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn(forbidden, props)
         self.assertNotIn("confirmed", props)
 
-    async def test_delegate_without_redundant_confirmation(self):
+    async def test_delegate_fails_fast_without_starting_model_inference(self):
         capabilities = HermesCapabilities()
-        with patch("hermes_mcp_gateway.capabilities._build_delegation_parent", return_value=MagicMock()), patch("hermes_mcp_gateway.capabilities.delegate_task", return_value=json.dumps({"success": True})) as delegate:
+        with patch(
+            "hermes_mcp_gateway.capabilities.asyncio.to_thread",
+            new_callable=AsyncMock,
+        ) as to_thread:
             result = await capabilities.call("delegate_task", {"goal": "Research auth design"})
-        self.assertFalse(result.is_error)
-        delegate.assert_called_once()
+        self.assertTrue(result.is_error)
+        self.assertIn("no enforceable deadline", result.content[0].text)
+        self.assertIn("native Hermes delegate_task", result.content[0].text)
+        to_thread.assert_not_awaited()
 
     async def test_delegate_legacy_confirmation_is_not_a_supported_argument(self):
         capabilities = HermesCapabilities()
-        with patch('hermes_mcp_gateway.capabilities.delegate_task') as delegate:
+        with patch(
+            "hermes_mcp_gateway.capabilities.asyncio.to_thread",
+            new_callable=AsyncMock,
+        ) as to_thread:
             result = await capabilities.call('delegate_task', {'goal': 'Research auth design', 'confirmed': True})
         self.assertTrue(result.is_error)
-        delegate.assert_not_called()
+        to_thread.assert_not_awaited()
 
-    async def test_delegate_runs_synchronously_as_leaf_and_closes_parent(self):
+    async def test_delegate_batch_fails_fast_without_starting_model_inference(self):
         capabilities = HermesCapabilities()
-        parent = MagicMock()
         with patch(
-            "hermes_mcp_gateway.capabilities._build_delegation_parent",
-            return_value=parent,
-        ), patch(
-            "hermes_mcp_gateway.capabilities.delegate_task",
-            return_value=json.dumps({"success": True, "results": [{"result": "done"}]}),
-        ) as delegate:
+            "hermes_mcp_gateway.capabilities.asyncio.to_thread",
+            new_callable=AsyncMock,
+        ) as to_thread:
             result = await capabilities.call(
                 "delegate_task",
                 {
-                    "goal": "Research auth design",
-                    "context": "Read-only research",
+                    "tasks": [
+                        {"goal": "Research auth design", "context": "Read-only research"},
+                        {"goal": "Review API constraints"},
+                    ],
                 },
             )
-        self.assertFalse(result.is_error)
-        delegate.assert_called_once_with(
-            goal="Research auth design",
-            context="Read-only research",
-            tasks=None,
-            role="leaf",
-            background=False,
-            parent_agent=parent,
-        )
-        parent.close.assert_called_once_with()
+        self.assertTrue(result.is_error)
+        self.assertIn("no enforceable deadline", result.content[0].text)
+        to_thread.assert_not_awaited()
 
     async def test_delegate_rejects_more_than_two_batch_tasks(self):
         capabilities = HermesCapabilities()
@@ -208,43 +207,6 @@ class DelegationCapabilityTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(result.is_error)
         self.assertIn("background", result.content[0].text)
-
-
-class DelegationParentPolicyTests(unittest.TestCase):
-    def test_parent_enables_only_explicit_native_toolsets(self):
-        from hermes_mcp_gateway.capabilities import _build_delegation_parent
-
-        parent = MagicMock()
-        runtime = {
-            "provider": "test-provider",
-            "requested_provider": "test-provider",
-            "base_url": "https://example.invalid/v1",
-            "api_mode": "chat_completions",
-            "api_key": "not-printed",
-            "credential_pool": None,
-        }
-        with patch(
-            "hermes_cli.config.load_config",
-            return_value={"model": {"default": "test-model"}},
-        ), patch(
-            "hermes_cli.runtime_provider.resolve_runtime_provider", return_value=runtime
-        ), patch(
-            "tools.mcp_tool_discovery.discover_mcp_tools", return_value=["unrelated_mcp_tool"]
-        ) as discover, patch(
-            "hermes_cli.fallback_config.get_fallback_chain", return_value=[]
-        ), patch("run_agent.AIAgent", return_value=parent) as agent_cls:
-            built = _build_delegation_parent()
-        self.assertIs(built, parent)
-        discover.assert_called_once()
-        kwargs = agent_cls.call_args.kwargs
-        self.assertEqual(kwargs["model"], "test-model")
-        self.assertEqual(kwargs["provider"], "test-provider")
-        self.assertEqual(
-            kwargs["enabled_toolsets"],
-            ["web", "vision", "skills", "file", "terminal", "code_execution"],
-        )
-        self.assertTrue(kwargs["skip_memory"])
-        self.assertTrue(kwargs["skip_context_files"])
 
 
 if __name__ == "__main__":

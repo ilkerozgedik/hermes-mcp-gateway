@@ -80,7 +80,10 @@ class GatewayConfig:
         "/srv/agents/src",
     )
     samchon_graph_max_sessions: int = 4
+    # Separate MCP read deadline: graph calls are intentionally allowed longer.
     samchon_graph_timeout_seconds: float = 120.0
+    # Hermes MCP reads and LSP RPCs use this budget; it is not a universal
+    # deadline for Gateway calls, especially thread-backed native dispatches.
     timeout_seconds: float = 30.0
     execution_timeout_seconds: float = 30.0
     execution_max_concurrent: int = 2

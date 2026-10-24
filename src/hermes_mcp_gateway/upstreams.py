@@ -518,6 +518,8 @@ class HermesToolsClient:
     async def call_direct(
         self, name: str, arguments: dict[str, Any], *, task_id: str | None
     ) -> types.CallToolResult:
+        # These native synchronous handlers run in worker threads. Do not add an
+        # asyncio timeout here: it would stop waiting without stopping the work.
         from gateway.session_context import clear_session_vars, set_session_vars
         from model_tools import handle_function_call
 
@@ -565,6 +567,8 @@ class HermesToolsClient:
     async def call_browser(
         self, name: str, arguments: dict[str, Any], *, task_id: str
     ) -> types.CallToolResult:
+        # Browser dispatch is thread-backed; cancellation cannot terminate the
+        # native handler, so this path has no claimed Gateway-wide deadline.
         from model_tools import handle_function_call
 
         value = await asyncio.to_thread(
@@ -600,6 +604,8 @@ class HermesToolsClient:
         return types.CallToolResult(content=[types.TextContent(text=value)])
 
     async def call_vision(self, arguments: dict[str, Any]) -> types.CallToolResult:
+        # Provider inference is synchronous in a worker thread and is not safely
+        # cancellable from asyncio; keep its deadline owned by the native client.
         from model_tools import handle_function_call
 
         value = await asyncio.to_thread(
