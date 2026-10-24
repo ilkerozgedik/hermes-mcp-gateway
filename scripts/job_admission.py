@@ -8,35 +8,95 @@ resume it on abort. Unknown jobs require reconciliation rather than a restart.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import os
 from pathlib import Path
+import re
 import sqlite3
 import stat
 import sys
 import time
+from typing import cast
 
 ACTIVE = frozenset({"starting", "running", "unknown"})
 KNOWN = ACTIVE | {"prepared", "succeeded", "failed", "cancelled", "timed_out", "expired"}
+OWNER_TOKEN_RE = re.compile(r"[A-Za-z0-9._~-]{32,128}\Z", re.ASCII)
+
+
+def _protected_path(path: Path, *, require_existing: bool) -> Path:
+    """Reject symlinks and untrusted or writable parent directories.
+
+    Only root-owned and effective-UID-owned directories with no group/world
+    write bit are trusted. This makes pathname checks stable against other-UID
+    replacement; same-UID processes are outside this tool's trust boundary.
+    """
+    absolute = Path(os.path.abspath(os.fspath(path)))
+    components = absolute.parts
+    current = Path(components[0])
+    trusted_owners = {0, os.geteuid()}
+
+    for component in components[1:-1]:
+        current = current / component
+        info = current.lstat()
+        if stat.S_ISLNK(info.st_mode):
+            raise ValueError("Path ancestors must not be symlinks")
+        if not stat.S_ISDIR(info.st_mode):
+            raise ValueError("Path ancestors must be directories")
+        if info.st_mode & 0o022:
+            raise ValueError("Path ancestors must not be group/world writable")
+        if info.st_uid not in trusted_owners:
+            raise ValueError("Path ancestors must be owned by root or the current user")
+
+    root_info = Path(components[0]).lstat()
+    if (not stat.S_ISDIR(root_info.st_mode) or root_info.st_mode & 0o022
+            or root_info.st_uid not in trusted_owners):
+        raise ValueError("Path ancestors must be protected directories owned by root or the current user")
+
+    try:
+        target = absolute.lstat()
+    except FileNotFoundError:
+        if require_existing:
+            raise
+    else:
+        if stat.S_ISLNK(target.st_mode):
+            raise ValueError("Path must not be a symlink")
+        if require_existing:
+            if not stat.S_ISREG(target.st_mode):
+                raise ValueError("The job database must be a regular file")
+            if target.st_mode & 0o022:
+                raise ValueError("The job database must not be group/world writable")
+        elif not stat.S_ISREG(target.st_mode):
+            raise ValueError("An existing snapshot destination must be a regular file")
+
+    return absolute
 
 
 def connect(path: Path, *, write: bool = False) -> sqlite3.Connection:
-    if path.is_symlink() or not path.is_file():
-        raise ValueError("An existing, non-symlink job database is required")
+    path = _protected_path(path, require_existing=True)
     before = path.stat()
-    if not stat.S_ISREG(before.st_mode) or before.st_mode & 0o022:
-        raise ValueError("The job database must not be group/world writable")
-    db = sqlite3.connect(path.absolute().as_uri() + ("?mode=rw" if write else "?mode=ro"),
+    db = sqlite3.connect(path.as_uri() + ("?mode=rw" if write else "?mode=ro"),
                          uri=True, timeout=3)
-    after = path.stat()
-    if (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino):
+    try:
+        _protected_path(path, require_existing=True)
+        after = path.stat()
+        if (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino):
+            raise ValueError("The job database changed during admission control")
+        return db
+    except BaseException:
         db.close()
-        raise ValueError("The job database changed during admission control")
-    return db
+        raise
 
 
-def set_draining(path: Path, enabled: bool) -> None:
+def _validated_owner_hash(owner_token: str) -> str:
+    if not isinstance(owner_token, str) or OWNER_TOKEN_RE.fullmatch(owner_token) is None:
+        raise ValueError("Owner token must contain 32..128 safe printable ASCII characters")
+    return hashlib.sha256(owner_token.encode("ascii")).hexdigest()
+
+
+def set_draining(path: Path, enabled: bool, *, owner_token: str) -> None:
+    owner_hash = _validated_owner_hash(owner_token)
     db = connect(path, write=True)
     try:
         with db:
@@ -45,9 +105,30 @@ def set_draining(path: Path, enabled: bool) -> None:
             # deploy must stop legacy ingress before using this additive gate.
             db.execute("CREATE TABLE IF NOT EXISTS gateway_settings "
                        "(key TEXT PRIMARY KEY, value TEXT NOT NULL)")
-            db.execute("INSERT INTO gateway_settings(key,value) VALUES('draining',?) "
-                       "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                       ("1" if enabled else "0",))
+            draining = db.execute(
+                "SELECT value FROM gateway_settings WHERE key='draining'"
+            ).fetchone()
+            current_owner = db.execute(
+                "SELECT value FROM gateway_settings WHERE key='drain_owner'"
+            ).fetchone()
+            is_paused = draining is not None and draining[0] != "0"
+
+            if enabled:
+                if is_paused and (current_owner is None or current_owner[0] != owner_hash):
+                    raise ValueError("The admission pause is owned by another operator")
+                db.execute("INSERT INTO gateway_settings(key,value) VALUES('draining','1') "
+                           "ON CONFLICT(key) DO UPDATE SET value=excluded.value")
+                db.execute("INSERT INTO gateway_settings(key,value) VALUES('drain_owner',?) "
+                           "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                           (owner_hash,))
+            else:
+                # Resuming an already-open gate is harmless and idempotent.
+                if not is_paused:
+                    return
+                if current_owner is None or current_owner[0] != owner_hash:
+                    raise ValueError("The admission pause is owned by another operator")
+                db.execute("UPDATE gateway_settings SET value='0' WHERE key='draining'")
+                db.execute("DELETE FROM gateway_settings WHERE key='drain_owner'")
     finally:
         db.close()
 
@@ -71,14 +152,19 @@ def status(path: Path) -> dict:
 
 
 def snapshot(path: Path, destination: Path) -> None:
+    destination = _protected_path(destination, require_existing=False)
     source = connect(path)
     created = False
     try:
         fd = os.open(destination, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
-        os.close(fd)
         created = True
+        created_info = os.fstat(fd)
+        os.close(fd)
         target = sqlite3.connect(destination, timeout=3)
         try:
+            current_info = _protected_path(destination, require_existing=True).stat()
+            if (created_info.st_dev, created_info.st_ino) != (current_info.st_dev, current_info.st_ino):
+                raise ValueError("The snapshot destination changed during creation")
             deadline = time.monotonic() + 10
 
             def progress(*_):
@@ -103,16 +189,29 @@ def bounded_seconds(raw: str) -> float:
     return value
 
 
+def owner_token_arg(raw: str) -> str:
+    try:
+        _validated_owner_hash(raw)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
+    return raw
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", choices=("status", "drain", "resume", "snapshot"))
     parser.add_argument("--database", required=True, type=Path)
     parser.add_argument("--destination", type=Path)
+    parser.add_argument("--owner-token", type=owner_token_arg)
     parser.add_argument("--timeout", type=bounded_seconds, default=120.0)
     parser.add_argument("--interval", type=bounded_seconds, default=1.0)
     args = parser.parse_args(argv)
     if not 0 < args.interval <= 10:
         parser.error("Interval must be positive and at most 10 seconds")
+    if args.action in ("drain", "resume") and args.owner_token is None:
+        parser.error("Drain and resume require --owner-token")
+    if args.action not in ("drain", "resume") and args.owner_token is not None:
+        parser.error("--owner-token is only valid with drain or resume")
     try:
         if args.action == "snapshot":
             if args.destination is None:
@@ -121,7 +220,10 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps({"snapshot_created": True}))
             return 0
         if args.action != "status":
-            set_draining(args.database, args.action == "drain")
+            if args.owner_token is None:
+                raise ValueError("Drain and resume require --owner-token")
+            set_draining(args.database, args.action == "drain",
+                         owner_token=cast(str, args.owner_token))
         deadline = time.monotonic() + args.timeout
         while True:
             result = status(args.database)
